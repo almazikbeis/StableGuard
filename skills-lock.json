@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "skills": {
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "computedHash": "063a0e6448123cd359ad0044cc46b0e490cc7964d45ef4bb9fd842bd2ffbca67"
+    },
+    "golang-backend-development": {
+      "source": "manutej/luxor-claude-marketplace",
+      "sourceType": "github",
+      "computedHash": "807ea7b237d8caebfbe34be301b3898963567ae64d120888a82d0f8fe5d0fd23"
+    },
+    "solana-anchor-claude-skill": {
+      "source": "quiknode-labs/solana-anchor-claude-skill",
+      "sourceType": "github",
+      "computedHash": "4cd7d6017eb50ab6153a61114644ce6ab675135621018f0ef3af5d4c030e9c3e"
+    },
+    "solana-dev": {
+      "source": "solana-foundation/solana-dev-skill",
+      "sourceType": "github",
+      "computedHash": "2a0b3c2a739988f3a6d583b68951de142864ac19debd56994aa1dc074c2b3831"
+    },
+    "solana-development": {
+      "source": "tenequm/claude-plugins",
+      "sourceType": "github",
+      "computedHash": "32666c6fc3d2af35aa23c8c69dda0af715cee528c641a80d28393b1a1d1bd817"
+    },
+    "solana-trader": {
+      "source": "solana-clawd/openclaw-solana-plugins",
+      "sourceType": "github",
+      "computedHash": "b065152d13672983445a89bfc554be971c701d3888796e4b21068d689c731830"
+    },
+    "vercel-react-best-practices": {
+      "source": "vercel-labs/agent-skills",
+      "sourceType": "github",
+      "computedHash": "bbc31a48537b473ff4feea6360ef0de3bfdcbef26c14f4967a5deefe8ca801d3"
+    }
+  }
+}

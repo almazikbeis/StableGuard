@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /Users/almazbeisenov/Desktop/StableGuard/stableguard/app && npm create vite@latest . -- --template react-ts 2>&1)",
+      "Bash(npm install && npm install -D tailwindcss @tailwindcss/vite && npm install framer-motion 2>&1)",
+      "Bash(tail:*)",
+      "Bash(anchor deploy:*)",
+      "Bash(solana airdrop 0.5 --url https://rpc.ankr.com/solana_devnet 2>&1 || solana airdrop 0.5 --url https://api.devnet.solana.com 2>&1)",
+      "Bash(mkdir -p /Users/almazbeisenov/Desktop/StableGuard/stableguard/backend && cd /Users/almazbeisenov/Desktop/StableGuard/stableguard/backend && go mod init stableguard-backend 2>&1)"
+    ]
+  }
+}
