@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Token, Transfer};
 
 use crate::errors::StableGuardError;
 use crate::state::vault::VaultState;
@@ -7,8 +7,8 @@ use crate::state::vault::VaultState;
 #[event]
 pub struct EmergencyWithdrawEvent {
     pub vault: Pubkey,
-    pub amount_a: u64,
-    pub amount_b: u64,
+    pub total_drained: u64,
+    pub num_tokens: u8,
     pub timestamp: i64,
 }
 
@@ -25,98 +25,82 @@ pub struct EmergencyWithdraw<'info> {
     )]
     pub vault: Account<'info, VaultState>,
 
-    #[account(
-        mut,
-        address = vault.vault_token_a
-    )]
-    pub vault_token_a: Account<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        address = vault.vault_token_b
-    )]
-    pub vault_token_b: Account<'info, TokenAccount>,
-
-    /// Authority's token A account (receives all token A)
-    #[account(mut)]
-    pub authority_token_a: Account<'info, TokenAccount>,
-
-    /// Authority's token B account (receives all token B)
-    #[account(mut)]
-    pub authority_token_b: Account<'info, TokenAccount>,
-
     pub token_program: Program<'info, Token>,
 }
 
 /// Emergency withdraw drains ALL vault tokens to authority.
 /// Works even when vault is paused — this is the emergency exit.
-pub fn handle_emergency_withdraw(ctx: Context<EmergencyWithdraw>) -> Result<()> {
-    // Collect values before mutable borrow
+///
+/// remaining_accounts layout (num_tokens = N):
+///   [0..N)   — vault token accounts (in index order)
+///   [N..2N)  — authority token accounts (same order)
+pub fn handle_emergency_withdraw<'info>(ctx: Context<'_, '_, '_, 'info, EmergencyWithdraw<'info>>) -> Result<()> {
     let authority_key = ctx.accounts.vault.authority;
-    let bump = ctx.accounts.vault.bump;
-    let vault_key = ctx.accounts.vault.key();
+    let bump          = ctx.accounts.vault.bump;
+    let vault_key     = ctx.accounts.vault.key();
+    let num_tokens    = ctx.accounts.vault.num_tokens as usize;
 
-    // Use actual SPL balances (not virtual) — they may differ due to virtual rebalances.
-    // Emergency withdraw drains everything physically in the vault.
-    let amount_a = ctx.accounts.vault_token_a.amount;
-    let amount_b = ctx.accounts.vault_token_b.amount;
-
-    let vault_token_a_info = ctx.accounts.vault_token_a.to_account_info();
-    let vault_token_b_info = ctx.accounts.vault_token_b.to_account_info();
-    let auth_token_a_info = ctx.accounts.authority_token_a.to_account_info();
-    let auth_token_b_info = ctx.accounts.authority_token_b.to_account_info();
-    let token_prog_info = ctx.accounts.token_program.to_account_info();
-    let vault_info = ctx.accounts.vault.to_account_info();
+    require!(
+        ctx.remaining_accounts.len() >= 2 * num_tokens,
+        StableGuardError::InvalidTokenIndex
+    );
 
     let seeds: &[&[u8]] = &[b"vault", authority_key.as_ref(), &[bump]];
     let signer = &[seeds];
 
-    // Transfer all of token A
-    if amount_a > 0 {
-        let cpi_ctx = CpiContext::new_with_signer(
-            token_prog_info.clone(),
-            Transfer {
-                from: vault_token_a_info,
-                to: auth_token_a_info,
-                authority: vault_info.clone(),
-            },
-            signer,
-        );
-        token::transfer(cpi_ctx, amount_a)?;
+    let token_prog_info = ctx.accounts.token_program.to_account_info();
+    let vault_info      = ctx.accounts.vault.to_account_info();
+
+    let mut total_drained: u64 = 0;
+
+    for i in 0..num_tokens {
+        let vault_token_info = &ctx.remaining_accounts[i];
+        let auth_token_info  = &ctx.remaining_accounts[num_tokens + i];
+
+        // Read on-chain SPL balance without taking ownership
+        let amount = {
+            let data = vault_token_info.try_borrow_data()?;
+            // SPL Token account: amount field at byte offset 64..72
+            if data.len() < 72 {
+                return err!(StableGuardError::InvalidTokenIndex);
+            }
+            u64::from_le_bytes(data[64..72].try_into().unwrap())
+        };
+
+        if amount > 0 {
+            let cpi_ctx = CpiContext::new_with_signer(
+                token_prog_info.clone(),
+                Transfer {
+                    from:      vault_token_info.clone(),
+                    to:        auth_token_info.clone(),
+                    authority: vault_info.clone(),
+                },
+                signer,
+            );
+            token::transfer(cpi_ctx, amount)?;
+            total_drained = total_drained.saturating_add(amount);
+        }
     }
 
-    // Transfer all of token B
-    if amount_b > 0 {
-        let cpi_ctx = CpiContext::new_with_signer(
-            token_prog_info,
-            Transfer {
-                from: vault_token_b_info,
-                to: auth_token_b_info,
-                authority: vault_info,
-            },
-            signer,
-        );
-        token::transfer(cpi_ctx, amount_b)?;
-    }
-
-    // Zero out vault balances
+    // Zero out all balances
     let vault = &mut ctx.accounts.vault;
-    vault.balance_a = 0;
-    vault.balance_b = 0;
+    for i in 0..num_tokens {
+        vault.balances[i] = 0;
+    }
     vault.total_deposited = 0;
 
     let timestamp = Clock::get()?.unix_timestamp;
     emit!(EmergencyWithdrawEvent {
         vault: vault_key,
-        amount_a,
-        amount_b,
+        total_drained,
+        num_tokens: num_tokens as u8,
         timestamp,
     });
 
     msg!(
-        "Emergency withdraw: {} token_a + {} token_b drained to authority",
-        amount_a,
-        amount_b
+        "Emergency withdraw: {} total tokens drained across {} token types",
+        total_drained,
+        num_tokens
     );
     Ok(())
 }

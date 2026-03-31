@@ -6,8 +6,8 @@ use crate::state::vault::VaultState;
 #[event]
 pub struct RebalanceExecuted {
     pub vault: Pubkey,
-    /// 0 = A→B (USDC→USDT), 1 = B→A (USDT→USDC)
-    pub direction: u8,
+    pub from_index: u8,
+    pub to_index: u8,
     pub amount: u64,
     pub timestamp: i64,
 }
@@ -26,30 +26,41 @@ pub struct ExecuteRebalance<'info> {
     pub vault: Account<'info, VaultState>,
 }
 
-/// Rebalance shifts the virtual allocation between token A and token B.
+/// Rebalance shifts the virtual allocation between two registered token slots.
 /// This is an internal accounting update — no cross-mint SPL transfer occurs.
-/// In production, the off-chain AI agent would trigger a real swap (e.g. via Jupiter)
-/// and then call this instruction to record the updated allocation.
-pub fn handle_rebalance(ctx: Context<ExecuteRebalance>, direction: u8, amount: u64) -> Result<()> {
+/// In production, the off-chain AI agent triggers a real swap (e.g. via Jupiter)
+/// then calls this instruction to record the updated allocation.
+pub fn handle_rebalance(
+    ctx: Context<ExecuteRebalance>,
+    from_index: u8,
+    to_index: u8,
+    amount: u64,
+) -> Result<()> {
     require!(!ctx.accounts.vault.is_paused, StableGuardError::VaultPaused);
-    require!(direction <= 1, StableGuardError::InvalidDirection);
     require!(amount > 0, StableGuardError::InvalidRebalanceAmount);
+    require!(from_index != to_index, StableGuardError::InvalidDirection);
+    require!(
+        (from_index as usize) < ctx.accounts.vault.num_tokens as usize,
+        StableGuardError::InvalidTokenIndex
+    );
+    require!(
+        (to_index as usize) < ctx.accounts.vault.num_tokens as usize,
+        StableGuardError::InvalidTokenIndex
+    );
+    require!(
+        ctx.accounts.vault.balances[from_index as usize] >= amount,
+        StableGuardError::InsufficientFunds
+    );
 
     let vault_key = ctx.accounts.vault.key();
-    let vault = &mut ctx.accounts.vault;
+    let vault     = &mut ctx.accounts.vault;
 
-    if direction == 0 {
-        // A → B: shift allocation from token A to token B
-        require!(vault.balance_a >= amount, StableGuardError::InsufficientFunds);
-        vault.balance_a = vault.balance_a.checked_sub(amount).ok_or(StableGuardError::MathOverflow)?;
-        vault.balance_b = vault.balance_b.checked_add(amount).ok_or(StableGuardError::MathOverflow)?;
-    } else {
-        // B → A: shift allocation from token B to token A
-        require!(vault.balance_b >= amount, StableGuardError::InsufficientFunds);
-        vault.balance_b = vault.balance_b.checked_sub(amount).ok_or(StableGuardError::MathOverflow)?;
-        vault.balance_a = vault.balance_a.checked_add(amount).ok_or(StableGuardError::MathOverflow)?;
-    }
-
+    vault.balances[from_index as usize] = vault.balances[from_index as usize]
+        .checked_sub(amount)
+        .ok_or(StableGuardError::MathOverflow)?;
+    vault.balances[to_index as usize] = vault.balances[to_index as usize]
+        .checked_add(amount)
+        .ok_or(StableGuardError::MathOverflow)?;
     vault.total_rebalances = vault
         .total_rebalances
         .checked_add(1)
@@ -59,17 +70,17 @@ pub fn handle_rebalance(ctx: Context<ExecuteRebalance>, direction: u8, amount: u
 
     emit!(RebalanceExecuted {
         vault: vault_key,
-        direction,
+        from_index,
+        to_index,
         amount,
         timestamp,
     });
 
     msg!(
-        "Rebalance executed: direction={} amount={} balance_a={} balance_b={} total_rebalances={}",
-        direction,
+        "Rebalance: from_index={} to_index={} amount={} total_rebalances={}",
+        from_index,
+        to_index,
         amount,
-        vault.balance_a,
-        vault.balance_b,
         vault.total_rebalances
     );
     Ok(())

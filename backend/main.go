@@ -1,12 +1,24 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"stableguard-backend/ai"
+	"stableguard-backend/alerts"
 	"stableguard-backend/api"
 	"stableguard-backend/config"
+	"stableguard-backend/hub"
 	"stableguard-backend/llm"
+	"stableguard-backend/pipeline"
 	"stableguard-backend/pyth"
+	"stableguard-backend/risk"
 	solanaexec "stableguard-backend/solana"
+	"stableguard-backend/store"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -17,9 +29,15 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Initialize services
-	pythMonitor := pyth.New(cfg.PythHermesURL)
+	// ── Persistent store ──────────────────────────────────────────────────
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("Failed to open store: %v", err)
+	}
+	defer db.Close()
 
+	// ── Services ──────────────────────────────────────────────────────────
+	pythMonitor := pyth.New(cfg.PythHermesURL)
 	llmClient := llm.New(cfg.AnthropicAPIKey)
 
 	executor, err := solanaexec.New(cfg.SolanaRPCURL, cfg.WalletKeyPath, cfg.ProgramID)
@@ -27,14 +45,57 @@ func main() {
 		log.Fatalf("Failed to initialize Solana executor: %v", err)
 	}
 
-	log.Printf("StableGuard backend starting")
+	// ── Alerts ────────────────────────────────────────────────────────────
+	alerter := alerts.New(
+		cfg.TelegramBotToken,
+		cfg.TelegramChatID,
+		cfg.DiscordWebhookURL,
+		time.Duration(cfg.AlertCooldownSec)*time.Second,
+	)
+
+	// ── SSE Hub ───────────────────────────────────────────────────────────
+	feedHub := hub.New()
+
+	// ── Real-time pipeline ────────────────────────────────────────────────
+	streamer := pyth.NewStreamer(
+		cfg.PythHermesURL,
+		time.Duration(cfg.StreamPollFallbackSec)*time.Second,
+	)
+	scorer := risk.NewWindowedScorer(20)
+	agents := ai.New(cfg.AnthropicAPIKey)
+
+	pipe := pipeline.New(streamer, scorer, agents, executor, cfg).
+		WithStore(db).
+		WithAlerter(alerter).
+		WithHub(feedHub)
+
+	// Graceful shutdown context
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// Start pipeline in background
+	go pipe.Run(ctx)
+
+	// ── Logging banner ────────────────────────────────────────────────────
+	strategyNames := map[uint8]string{0: "SAFE", 1: "BALANCED", 2: "YIELD"}
+	log.Printf("╔══════════════════════════════════════════════════╗")
+	log.Printf("║         StableGuard Backend v3                  ║")
+	log.Printf("╚══════════════════════════════════════════════════╝")
 	log.Printf("  Program ID  : %s", cfg.ProgramID)
 	log.Printf("  Wallet      : %s", executor.WalletAddress())
 	log.Printf("  RPC         : %s", cfg.SolanaRPCURL)
+	log.Printf("  Strategy    : %s (mode=%d)", strategyNames[cfg.StrategyMode], cfg.StrategyMode)
+	log.Printf("  AutoExecute : %v", cfg.AutoExecute)
+	log.Printf("  AI interval : %ds", cfg.AIIntervalSec)
+	log.Printf("  Alerts      : Telegram=%v Discord=%v",
+		cfg.TelegramBotToken != "", cfg.DiscordWebhookURL != "")
+	log.Printf("  Circuit Br. : enabled=%v pause=%.1f%% emergency=%.1f%%",
+		cfg.CircuitBreakerEnabled, cfg.CircuitBreakerPausePct, cfg.CircuitBreakerEmergencyPct)
+	log.Printf("  Pipeline    : running (SSE → risk v2 → agents → alerts)")
 
-	// Set up Fiber app
+	// ── Fiber API ─────────────────────────────────────────────────────────
 	app := fiber.New(fiber.Config{
-		AppName: "StableGuard API v1",
+		AppName: "StableGuard API v3",
 	})
 
 	app.Use(recover.New())
@@ -44,9 +105,19 @@ func main() {
 		AllowHeaders: "Origin, Content-Type, Accept",
 	}))
 
-	// Register routes
-	handler := api.New(pythMonitor, llmClient, executor)
+	handler := api.New(pythMonitor, llmClient, executor).
+		WithPipeline(pipe).
+		WithStore(db).
+		WithAlerter(alerter).
+		WithHub(feedHub)
 	handler.Register(app)
+
+	// Shutdown Fiber when context is cancelled
+	go func() {
+		<-ctx.Done()
+		log.Printf("Shutting down server…")
+		_ = app.Shutdown()
+	}()
 
 	log.Printf("  Listening on :%s", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {

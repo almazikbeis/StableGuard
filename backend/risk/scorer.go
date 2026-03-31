@@ -12,8 +12,10 @@ type Score struct {
 	RiskLevel float64
 	// Deviation between USDC and USDT price (percentage)
 	Deviation float64
-	// Suggested rebalance direction: 0 = A→B, 1 = B→A, -1 = no action
-	SuggestedDirection int
+	// FromIndex is the token slot to move funds from (-1 = no action)
+	FromIndex int
+	// ToIndex is the token slot to move funds to (-1 = no action)
+	ToIndex int
 	// Suggested amount as fraction of total vault (0–1)
 	SuggestedFraction float64
 	// Human-readable summary
@@ -38,9 +40,10 @@ const YieldDeviationThresholdBPS = 0.5 // 0.005%
 const MaxRiskDeviation = 50.0
 
 // Compute calculates a risk score from a Pyth price snapshot.
-// strategyMode: 0 = Safe (conservative), 1 = Yield (aggressive arbitrage)
-// balanceA and balanceB are the current virtual balances in the vault.
-func Compute(snap *pyth.PriceSnapshot, balanceA, balanceB uint64, strategyMode uint8) Score {
+// strategyMode: 0 = Safe (conservative), 1 = Yield (aggressive arbitrage).
+// balances is the current virtual balance slice for all registered tokens;
+// index 0 is assumed to be USDC, index 1 is USDT (adjust for your token ordering).
+func Compute(snap *pyth.PriceSnapshot, balances []uint64, strategyMode uint8) Score {
 	devPct := snap.Deviation()
 	devBPS := devPct * 100 // convert percentage to bps
 
@@ -51,11 +54,9 @@ func Compute(snap *pyth.PriceSnapshot, balanceA, balanceB uint64, strategyMode u
 	var threshold float64
 
 	if strategyMode == StrategyModeYield {
-		// Yield mode: 3× more sensitive — small deviations are opportunities
 		effectiveScore = math.Min(100, baseScore*3)
 		threshold = YieldDeviationThresholdBPS
 	} else {
-		// Safe mode: standard sensitivity
 		effectiveScore = baseScore
 		threshold = SafeDeviationThresholdBPS
 	}
@@ -63,11 +64,11 @@ func Compute(snap *pyth.PriceSnapshot, balanceA, balanceB uint64, strategyMode u
 	s := Score{
 		RiskLevel: math.Round(effectiveScore*100) / 100,
 		Deviation: devPct,
+		FromIndex: -1,
+		ToIndex:   -1,
 	}
 
 	if devBPS < threshold {
-		s.SuggestedDirection = -1
-		s.SuggestedFraction = 0
 		s.Action = "hold"
 		if strategyMode == StrategyModeYield {
 			s.Summary = "Spread too tight for yield arbitrage, holding"
@@ -77,17 +78,22 @@ func Compute(snap *pyth.PriceSnapshot, balanceA, balanceB uint64, strategyMode u
 		return s
 	}
 
-	total := balanceA + balanceB
+	var total uint64
+	for _, b := range balances {
+		total += b
+	}
 	if total == 0 {
-		s.SuggestedDirection = -1
 		s.Action = "hold"
 		s.Summary = "Vault empty"
 		return s
 	}
 
+	// Default: index 0 = USDC-equivalent, index 1 = USDT-equivalent.
+	// Determine which direction to rebalance based on which token is overpriced.
 	if snap.USDC.Price > snap.USDT.Price {
-		// USDC > USDT: sell expensive USDC, buy cheap USDT → direction 0 (A→B)
-		s.SuggestedDirection = 0
+		// USDC > USDT: sell expensive USDC (index 0), buy cheap USDT (index 1)
+		s.FromIndex = 0
+		s.ToIndex = 1
 		s.Action = "swap_usdc_to_usdt"
 		if strategyMode == StrategyModeYield {
 			s.SuggestedFraction = math.Min(0.5, devBPS/10)
@@ -97,8 +103,9 @@ func Compute(snap *pyth.PriceSnapshot, balanceA, balanceB uint64, strategyMode u
 			s.Summary = "USDC trading above peg — shift allocation to USDT"
 		}
 	} else {
-		// USDT > USDC: sell expensive USDT, buy cheap USDC → direction 1 (B→A)
-		s.SuggestedDirection = 1
+		// USDT > USDC: sell expensive USDT (index 1), buy cheap USDC (index 0)
+		s.FromIndex = 1
+		s.ToIndex = 0
 		s.Action = "swap_usdt_to_usdc"
 		if strategyMode == StrategyModeYield {
 			s.SuggestedFraction = math.Min(0.5, devBPS/10)
@@ -115,12 +122,10 @@ func Compute(snap *pyth.PriceSnapshot, balanceA, balanceB uint64, strategyMode u
 // DetermineAction returns the action string based on strategy mode and risk score.
 func DetermineAction(score Score, threshold uint8, strategyMode uint8) string {
 	if strategyMode == StrategyModeSafe {
-		// Safe: only act if risk exceeds configured threshold
 		if score.RiskLevel < float64(threshold) {
 			return "hold"
 		}
 	} else {
-		// Yield: act on any spread > 5 risk points
 		if score.RiskLevel < 5 {
 			return "hold"
 		}

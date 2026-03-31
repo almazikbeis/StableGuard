@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
-// Pyth price feed IDs for USDC and USDT on Solana
+// Kept for backward-compat with any code that references these constants directly.
 const (
 	FeedIDUSDC = "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
 	FeedIDUSDT = "0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b"
@@ -18,37 +19,74 @@ const (
 
 // PriceData holds a parsed price from Pyth Hermes.
 type PriceData struct {
-	FeedID     string
-	Price      float64 // e.g. 1.0002 USD
-	Confidence float64 // ±conf in USD
+	FeedID      string
+	Price       float64 // e.g. 1.0002 USD
+	Confidence  float64 // ±conf in USD
 	PublishTime time.Time
 }
 
-// PriceSnapshot holds a snapshot of both USDC and USDT prices.
+// PriceSnapshot holds the latest prices for all monitored stablecoins.
+//
+// All is the canonical map — keyed by Symbol (e.g. "USDC").
+// USDC and USDT are kept for backward-compat with existing callers.
 type PriceSnapshot struct {
-	USDC      PriceData
-	USDT      PriceData
+	All       map[string]PriceData // symbol → price; always populated
+	USDC      PriceData            // backward-compat alias for All["USDC"]
+	USDT      PriceData            // backward-compat alias for All["USDT"]
 	FetchedAt time.Time
 }
 
 // Deviation returns |USDC.Price - USDT.Price| as a percentage.
+// Kept for backward-compat; prefer DeviationBetween for multi-token use.
 func (s PriceSnapshot) Deviation() float64 {
-	diff := math.Abs(s.USDC.Price - s.USDT.Price)
-	avg := (s.USDC.Price + s.USDT.Price) / 2
+	return s.DeviationBetween("USDC", "USDT")
+}
+
+// DeviationBetween returns |price(a) - price(b)| as a percentage.
+func (s PriceSnapshot) DeviationBetween(a, b string) float64 {
+	pa, ok1 := s.All[a]
+	pb, ok2 := s.All[b]
+	if !ok1 || !ok2 || pa.Price == 0 || pb.Price == 0 {
+		return 0
+	}
+	diff := math.Abs(pa.Price - pb.Price)
+	avg := (pa.Price + pb.Price) / 2
 	if avg == 0 {
 		return 0
 	}
 	return (diff / avg) * 100
 }
 
+// MaxDeviation returns the maximum pairwise deviation among all monitored tokens.
+func (s PriceSnapshot) MaxDeviation() float64 {
+	tokens := make([]PriceData, 0, len(s.All))
+	for _, pd := range s.All {
+		tokens = append(tokens, pd)
+	}
+	max := 0.0
+	for i := 0; i < len(tokens); i++ {
+		for j := i + 1; j < len(tokens); j++ {
+			a, b := tokens[i].Price, tokens[j].Price
+			if a == 0 || b == 0 {
+				continue
+			}
+			d := math.Abs(a-b) / ((a + b) / 2) * 100
+			if d > max {
+				max = d
+			}
+		}
+	}
+	return max
+}
+
 type hermesResponse struct {
 	Parsed []struct {
 		ID    string `json:"id"`
 		Price struct {
-			Price    string `json:"price"`
-			Conf     string `json:"conf"`
-			Expo     int    `json:"expo"`
-			PublishTime int64 `json:"publish_time"`
+			Price       string `json:"price"`
+			Conf        string `json:"conf"`
+			Expo        int    `json:"expo"`
+			PublishTime int64  `json:"publish_time"`
 		} `json:"price"`
 	} `json:"parsed"`
 }
@@ -67,12 +105,15 @@ func New(hermesURL string) *Monitor {
 	}
 }
 
-// FetchSnapshot fetches latest USDC and USDT prices from Pyth Hermes.
+// FetchSnapshot fetches latest prices for all ActiveFeeds from Pyth Hermes.
 func (m *Monitor) FetchSnapshot() (*PriceSnapshot, error) {
-	url := fmt.Sprintf(
-		"%s/v2/updates/price/latest?ids[]=%s&ids[]=%s&parsed=true",
-		m.hermesURL, FeedIDUSDC, FeedIDUSDT,
-	)
+	ids := AllFeedIDs()
+	params := make([]string, len(ids))
+	for i, id := range ids {
+		params[i] = "ids[]=" + id
+	}
+	url := fmt.Sprintf("%s/v2/updates/price/latest?%s&parsed=true",
+		m.hermesURL, strings.Join(params, "&"))
 
 	resp, err := m.client.Get(url)
 	if err != nil {
@@ -89,21 +130,31 @@ func (m *Monitor) FetchSnapshot() (*PriceSnapshot, error) {
 		return nil, fmt.Errorf("pyth decode: %w", err)
 	}
 
-	snap := &PriceSnapshot{FetchedAt: time.Now()}
+	return buildSnapshot(&hr), nil
+}
+
+// buildSnapshot turns a hermesResponse into a PriceSnapshot with All map populated.
+func buildSnapshot(hr *hermesResponse) *PriceSnapshot {
+	snap := &PriceSnapshot{
+		All:       make(map[string]PriceData, len(ActiveFeeds)),
+		FetchedAt: time.Now(),
+	}
 	for _, p := range hr.Parsed {
 		pd, err := parsePrice(p.ID, p.Price.Price, p.Price.Conf, p.Price.Expo, p.Price.PublishTime)
 		if err != nil {
 			continue
 		}
-		switch "0x" + p.ID {
-		case FeedIDUSDC:
-			snap.USDC = pd
-		case FeedIDUSDT:
-			snap.USDT = pd
+		// Match by feed ID (with or without 0x)
+		feed, ok := FeedByID(p.ID)
+		if !ok {
+			continue
 		}
+		snap.All[feed.Symbol] = pd
 	}
-
-	return snap, nil
+	// Populate backward-compat fields
+	snap.USDC = snap.All["USDC"]
+	snap.USDT = snap.All["USDT"]
+	return snap
 }
 
 func parsePrice(id, priceStr, confStr string, expo int, publishTime int64) (PriceData, error) {

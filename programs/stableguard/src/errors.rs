@@ -26,7 +26,7 @@ pub enum StableGuardError {
     #[msg("Vault is paused — deposits and rebalances are disabled")]
     VaultPaused,
 
-    #[msg("Invalid rebalance direction")]
+    #[msg("Invalid rebalance direction — from and to indices must differ")]
     InvalidDirection,
 
     #[msg("Rebalance amount must be greater than zero")]
@@ -43,4 +43,13 @@ pub enum StableGuardError {
 
     #[msg("Caller is not the vault authority")]
     Unauthorized,
+
+    #[msg("Token index out of bounds or token not registered")]
+    InvalidTokenIndex,
+
+    #[msg("Token slot already occupied — unregister first")]
+    TokenSlotOccupied,
+
+    #[msg("Maximum number of tokens (8) already reached")]
+    MaxTokensReached,
 }

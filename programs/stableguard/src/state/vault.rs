@@ -1,23 +1,19 @@
 use anchor_lang::prelude::*;
 
+pub const MAX_TOKENS: usize = 8;
+
 #[account]
 pub struct VaultState {
     /// Authority who controls this vault
     pub authority: Pubkey,
-    /// Token A mint (e.g. USDC)
-    pub mint_a: Pubkey,
-    /// Token B mint (e.g. USDT)
-    pub mint_b: Pubkey,
-    /// Vault token account for mint_a
-    pub vault_token_a: Pubkey,
-    /// Vault token account for mint_b
-    pub vault_token_b: Pubkey,
-    /// Total tokens deposited across both (in smallest unit)
+    /// Token mints (up to MAX_TOKENS); unused slots are Pubkey::default()
+    pub mints: [Pubkey; 8],
+    /// Vault token accounts (up to MAX_TOKENS); unused slots are Pubkey::default()
+    pub vault_tokens: [Pubkey; 8],
+    /// Total tokens deposited across all registered tokens (in smallest unit)
     pub total_deposited: u64,
-    /// Virtual balance tracking for token A (updated on deposit/withdraw/rebalance)
-    pub balance_a: u64,
-    /// Virtual balance tracking for token B (updated on deposit/withdraw/rebalance)
-    pub balance_b: u64,
+    /// Virtual balances per token slot
+    pub balances: [u64; 8],
     /// Threshold (1–100) at which rebalancing is triggered
     pub rebalance_threshold: u64,
     /// Maximum allowed deposit per transaction
@@ -26,6 +22,8 @@ pub struct VaultState {
     pub decision_count: u64,
     /// Number of rebalances executed
     pub total_rebalances: u64,
+    /// How many token slots are active (registered)
+    pub num_tokens: u8,
     /// Emergency pause flag
     pub is_paused: bool,
     /// Strategy mode: 0 = Safe, 1 = Yield
@@ -35,37 +33,47 @@ pub struct VaultState {
 }
 
 impl VaultState {
-    pub const LEN: usize = 8    // discriminator
-        + 32   // authority
-        + 32   // mint_a
-        + 32   // mint_b
-        + 32   // vault_token_a
-        + 32   // vault_token_b
-        + 8    // total_deposited
-        + 8    // balance_a
-        + 8    // balance_b
-        + 8    // rebalance_threshold
-        + 8    // max_deposit
-        + 8    // decision_count
-        + 8    // total_rebalances
-        + 1    // is_paused
-        + 1    // strategy_mode
-        + 1;   // bump
-    // Total: 227 bytes
+    pub const LEN: usize = 8       // discriminator
+        + 32                        // authority
+        + 32 * 8                    // mints
+        + 32 * 8                    // vault_tokens
+        + 8                         // total_deposited
+        + 8 * 8                     // balances
+        + 8                         // rebalance_threshold
+        + 8                         // max_deposit
+        + 8                         // decision_count
+        + 8                         // total_rebalances
+        + 1                         // num_tokens
+        + 1                         // is_paused
+        + 1                         // strategy_mode
+        + 1;                        // bump
+    // Total: 660 bytes
 
     pub fn get_total_value(&self) -> u64 {
-        self.balance_a.saturating_add(self.balance_b)
+        self.balances[..self.num_tokens as usize]
+            .iter()
+            .fold(0u64, |acc, &b| acc.saturating_add(b))
     }
 
-    /// Returns (pct_a, pct_b) allocation percentages (0–100 each)
-    pub fn get_allocation_pct(&self) -> (u8, u8) {
+    /// Returns allocation percentages for each registered token (0–100).
+    /// Remaining slots (beyond num_tokens) are 0.
+    pub fn get_allocation_pct(&self) -> [u8; MAX_TOKENS] {
         let total = self.get_total_value();
+        let mut pcts = [0u8; MAX_TOKENS];
         if total == 0 {
-            return (0, 0);
+            return pcts;
         }
-        let pct_a = ((self.balance_a as u128 * 100) / total as u128) as u8;
-        let pct_b = 100u8.saturating_sub(pct_a);
-        (pct_a, pct_b)
+        let n = self.num_tokens as usize;
+        let mut assigned: u16 = 0;
+        for i in 0..n.saturating_sub(1) {
+            let p = ((self.balances[i] as u128 * 100) / total as u128) as u8;
+            pcts[i] = p;
+            assigned += p as u16;
+        }
+        if n > 0 {
+            pcts[n - 1] = (100u16.saturating_sub(assigned)) as u8;
+        }
+        pcts
     }
 
     pub fn strategy_name(&self) -> &str {
