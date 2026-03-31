@@ -90,8 +90,108 @@ func (s *DB) migrate() error {
 		action     TEXT    NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_re_ts ON risk_events(ts);
+
+	CREATE TABLE IF NOT EXISTS yield_positions (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		protocol     TEXT    NOT NULL,
+		token        TEXT    NOT NULL,
+		amount       REAL    NOT NULL,
+		entry_apy    REAL    NOT NULL,
+		deposited_at INTEGER NOT NULL,
+		withdrawn_at INTEGER,
+		earned       REAL    NOT NULL DEFAULT 0,
+		deposit_sig  TEXT    NOT NULL DEFAULT '',
+		withdraw_sig TEXT    NOT NULL DEFAULT '',
+		is_active    INTEGER NOT NULL DEFAULT 1
+	);
+	CREATE INDEX IF NOT EXISTS idx_yp_active ON yield_positions(is_active);
 	`)
 	return err
+}
+
+// ── Yield positions ────────────────────────────────────────────────────────
+
+// YieldPosition is one row in yield_positions.
+type YieldPosition struct {
+	ID          int64
+	Protocol    string
+	Token       string
+	Amount      float64
+	EntryAPY    float64
+	DepositedAt time.Time
+	WithdrawnAt *time.Time
+	Earned      float64
+	DepositSig  string
+	WithdrawSig string
+	IsActive    bool
+}
+
+// SaveYieldPosition inserts a new open position.
+func (s *DB) SaveYieldPosition(protocol, token string, amount, entryAPY float64, depositSig string) (int64, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO yield_positions (protocol, token, amount, entry_apy, deposited_at, deposit_sig)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		protocol, token, amount, entryAPY, time.Now().Unix(), depositSig,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// CloseYieldPosition marks a position as withdrawn and records earned yield.
+func (s *DB) CloseYieldPosition(id int64, earned float64, withdrawSig string) error {
+	_, err := s.db.Exec(
+		`UPDATE yield_positions SET is_active=0, withdrawn_at=?, earned=?, withdraw_sig=? WHERE id=?`,
+		time.Now().Unix(), earned, withdrawSig, id,
+	)
+	return err
+}
+
+// ActiveYieldPosition returns the currently open position, if any.
+func (s *DB) ActiveYieldPosition() (*YieldPosition, error) {
+	row := s.db.QueryRow(
+		`SELECT id, protocol, token, amount, entry_apy, deposited_at, earned, deposit_sig
+		 FROM yield_positions WHERE is_active=1 ORDER BY deposited_at DESC LIMIT 1`,
+	)
+	var p YieldPosition
+	var depositedAt int64
+	err := row.Scan(&p.ID, &p.Protocol, &p.Token, &p.Amount, &p.EntryAPY,
+		&depositedAt, &p.Earned, &p.DepositSig)
+	if err != nil {
+		return nil, err // sql.ErrNoRows if none
+	}
+	p.DepositedAt = time.Unix(depositedAt, 0)
+	p.IsActive = true
+	return &p, nil
+}
+
+// RecentYieldPositions returns the last N positions.
+func (s *DB) RecentYieldPositions(limit int) ([]YieldPosition, error) {
+	rows, err := s.db.Query(
+		`SELECT id, protocol, token, amount, entry_apy, deposited_at,
+		        earned, deposit_sig, withdraw_sig, is_active
+		 FROM yield_positions ORDER BY deposited_at DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []YieldPosition
+	for rows.Next() {
+		var p YieldPosition
+		var depositedAt int64
+		var active int
+		if err := rows.Scan(&p.ID, &p.Protocol, &p.Token, &p.Amount, &p.EntryAPY,
+			&depositedAt, &p.Earned, &p.DepositSig, &p.WithdrawSig, &active); err != nil {
+			continue
+		}
+		p.DepositedAt = time.Unix(depositedAt, 0)
+		p.IsActive = active == 1
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // ── Price snapshots ────────────────────────────────────────────────────────

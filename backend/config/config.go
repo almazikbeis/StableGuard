@@ -49,6 +49,18 @@ type Config struct {
 	CircuitBreakerPausePct float64
 	// CircuitBreakerEmergencyPct: deviation % that triggers critical alert (default 3.0)
 	CircuitBreakerEmergencyPct float64
+
+	// ── Yield Optimizer ──────────────────────────────────────────────────
+	// YieldEnabled: enables automatic yield deposits on OPTIMIZE signal
+	YieldEnabled bool
+	// YieldMinAPY: minimum APY % required to deposit (default 4.0)
+	YieldMinAPY float64
+	// YieldEntryRisk: max risk score to enter a yield position (default 35)
+	YieldEntryRisk float64
+	// YieldExitRisk: risk score above which to withdraw from yield (default 55)
+	YieldExitRisk float64
+	// YieldDepositUSDC: amount of USDC-equivalent to deposit in each cycle (default 1000)
+	YieldDepositAmount float64
 }
 
 func Load() *Config {
@@ -82,6 +94,12 @@ func Load() *Config {
 		CircuitBreakerEnabled:      getBool("CIRCUIT_BREAKER_ENABLED", true),
 		CircuitBreakerPausePct:     getFloat("CIRCUIT_BREAKER_PAUSE_PCT", 1.5),
 		CircuitBreakerEmergencyPct: getFloat("CIRCUIT_BREAKER_EMERGENCY_PCT", 3.0),
+
+		YieldEnabled:       getBool("YIELD_ENABLED", false),
+		YieldMinAPY:        getFloat("YIELD_MIN_APY", 4.0),
+		YieldEntryRisk:     getFloat("YIELD_ENTRY_RISK", 35.0),
+		YieldExitRisk:      getFloat("YIELD_EXIT_RISK", 55.0),
+		YieldDepositAmount: getFloat("YIELD_DEPOSIT_AMOUNT", 1000.0),
 	}
 }
 

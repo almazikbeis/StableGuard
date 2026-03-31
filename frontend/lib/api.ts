@@ -110,6 +110,31 @@ export interface HistoryStats {
   last_decision_ts?: number;
 }
 
+export interface YieldOpportunity {
+  protocol: "kamino" | "marginfi" | "drift";
+  display_name: string;
+  url: string;
+  token: string;
+  supply_apy: number;
+  borrow_apy: number;
+  tvl_millions: number;
+  util_rate: number;
+  updated_at: number;
+  is_live: boolean;
+}
+
+export interface YieldPosition {
+  id: number;
+  protocol: string;
+  token: string;
+  amount: number;
+  entry_apy: number;
+  deposited_at: string;
+  earned: number;
+  deposit_sig: string;
+  is_active: boolean;
+}
+
 // ── API calls ──────────────────────────────────────────────────────────────
 
 export const api = {
@@ -126,4 +151,12 @@ export const api = {
   setStrategy: (mode: number) => post("/strategy", { mode }),
   rebalance: (from_index: number, to_index: number, amount: number) =>
     post("/rebalance", { from_index, to_index, amount }),
+
+  // Yield optimizer
+  yieldOpportunities: () =>
+    get<{ opportunities: YieldOpportunity[]; count: number; updated_at: number }>("/yield/opportunities"),
+  yieldPosition: () =>
+    get<{ position: YieldPosition | null }>("/yield/position"),
+  yieldHistory: (limit = 20) =>
+    get<{ positions: YieldPosition[] }>(`/yield/history?limit=${limit}`),
 };

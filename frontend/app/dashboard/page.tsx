@@ -14,6 +14,9 @@ import { DecisionFeed } from "@/components/DecisionFeed";
 import { StatCard } from "@/components/StatCard";
 import { PriceChart } from "@/components/PriceChart";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { YieldOpportunities } from "@/components/YieldOpportunities";
+import { YieldPosition } from "@/components/YieldPosition";
+import { DAOPayments } from "@/components/DAOPayments";
 import {
   BarChart2,
   Zap,
@@ -343,6 +346,22 @@ export default function Dashboard() {
               )}
             </Card>
           </motion.div>
+        </motion.div>
+
+        {/* ── Yield Optimizer ── */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.38 }}
+          className="space-y-3"
+        >
+          <YieldPosition position={liveData?.yield_position ?? null} />
+          <YieldOpportunities />
+        </motion.div>
+
+        {/* ── DAO Treasury Payments ── */}
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.42 }}>
+          <DAOPayments />
         </motion.div>
 
         {/* ── AI Decision feed ── */}

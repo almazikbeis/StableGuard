@@ -18,6 +18,7 @@ import (
 	"stableguard-backend/risk"
 	solanaexec "stableguard-backend/solana"
 	"stableguard-backend/store"
+	"stableguard-backend/yield"
 )
 
 // Engine is the real-time decision pipeline.
@@ -27,16 +28,18 @@ type Engine struct {
 	agents   *ai.MultiAgentSystem
 	executor *solanaexec.Executor
 	cfg      *config.Config
-	store    *store.DB       // optional
-	alerter  *alerts.Client  // optional
-	hub      *hub.Hub        // optional — SSE broadcast
+	store    *store.DB          // optional
+	alerter  *alerts.Client     // optional
+	hub      *hub.Hub           // optional — SSE broadcast
+	yieldAgg *yield.Aggregator  // optional — yield APY data
 
-	mu              sync.RWMutex
-	lastDecision    *ai.FinalDecision
-	lastScore       risk.ScoreV2
-	lastExecSig     string
-	lastSnap        *pyth.PriceSnapshot
-	circuitTripped  bool // vault has been auto-paused
+	mu                   sync.RWMutex
+	lastDecision         *ai.FinalDecision
+	lastScore            risk.ScoreV2
+	lastExecSig          string
+	lastSnap             *pyth.PriceSnapshot
+	circuitTripped       bool  // vault has been auto-paused
+	activeYieldPositionID int64 // 0 = no active position
 }
 
 // New creates a pipeline Engine.
@@ -56,9 +59,10 @@ func New(
 	}
 }
 
-func (e *Engine) WithStore(s *store.DB) *Engine   { e.store = s; return e }
+func (e *Engine) WithStore(s *store.DB) *Engine        { e.store = s; return e }
 func (e *Engine) WithAlerter(a *alerts.Client) *Engine { e.alerter = a; return e }
-func (e *Engine) WithHub(h *hub.Hub) *Engine       { e.hub = h; return e }
+func (e *Engine) WithHub(h *hub.Hub) *Engine           { e.hub = h; return e }
+func (e *Engine) WithYield(agg *yield.Aggregator) *Engine { e.yieldAgg = agg; return e }
 
 // Run starts the pipeline loop. Blocks until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context) {
@@ -184,7 +188,12 @@ func (e *Engine) Run(ctx context.Context) {
 				e.executeDecision(ctx, decision, score, balances)
 			}
 
-			// Re-broadcast with decision included
+			// ── Step 10: Yield optimizer (Variant B — tracked position) ───
+			if e.cfg.YieldEnabled && e.store != nil && e.yieldAgg != nil {
+				e.handleYield(ctx, score, decision)
+			}
+
+			// Re-broadcast with decision included (includes yield position)
 			if e.hub != nil {
 				e.broadcastUpdate(snap, score)
 			}
@@ -264,14 +273,25 @@ func (e *Engine) checkRiskAlerts(score risk.ScoreV2, maxDev float64) {
 
 // ── SSE Broadcast ──────────────────────────────────────────────────────────
 
+// YieldPositionMsg is the yield position embedded in SSE broadcasts.
+type YieldPositionMsg struct {
+	Protocol    string  `json:"protocol"`
+	Token       string  `json:"token"`
+	Amount      float64 `json:"amount"`
+	EntryAPY    float64 `json:"entry_apy"`
+	Earned      float64 `json:"earned"`
+	DepositedAt int64   `json:"deposited_at"`
+}
+
 // FeedMessage is the JSON payload pushed to SSE clients.
 type FeedMessage struct {
-	Ts          int64              `json:"ts"`
-	Risk        risk.ScoreV2       `json:"risk"`
-	Prices      map[string]float64 `json:"prices"`
-	MaxDeviation float64           `json:"max_deviation"`
-	Decision    *ai.FinalDecision  `json:"decision,omitempty"`
-	ExecSig     string             `json:"exec_sig,omitempty"`
+	Ts           int64              `json:"ts"`
+	Risk         risk.ScoreV2       `json:"risk"`
+	Prices       map[string]float64 `json:"prices"`
+	MaxDeviation float64            `json:"max_deviation"`
+	Decision     *ai.FinalDecision  `json:"decision,omitempty"`
+	ExecSig      string             `json:"exec_sig,omitempty"`
+	YieldPos     *YieldPositionMsg  `json:"yield_position,omitempty"`
 }
 
 func (e *Engine) broadcastUpdate(snap *pyth.PriceSnapshot, score risk.ScoreV2) {
@@ -293,6 +313,23 @@ func (e *Engine) broadcastUpdate(snap *pyth.PriceSnapshot, score risk.ScoreV2) {
 		Decision:     dec,
 		ExecSig:      sig,
 	}
+
+	// Attach active yield position with live earned calculation
+	if e.store != nil {
+		if pos, err := e.store.ActiveYieldPosition(); err == nil && pos != nil {
+			elapsed := time.Since(pos.DepositedAt).Seconds()
+			earned := pos.Amount * (pos.EntryAPY / 100) / (365.25 * 24 * 3600) * elapsed
+			msg.YieldPos = &YieldPositionMsg{
+				Protocol:    pos.Protocol,
+				Token:       pos.Token,
+				Amount:      pos.Amount,
+				EntryAPY:    pos.EntryAPY,
+				Earned:      earned,
+				DepositedAt: pos.DepositedAt.Unix(),
+			}
+		}
+	}
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return
@@ -403,6 +440,109 @@ func (e *Engine) CircuitTripped() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.circuitTripped
+}
+
+// ── Yield Optimizer (Variant B — Tracked Position) ─────────────────────────
+
+// handleYield manages simulated yield positions based on AI decisions and risk level.
+// Entry: OPTIMIZE decision + risk < YieldEntryRisk + no open position.
+// Exit:  risk > YieldExitRisk + open position exists.
+func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *ai.FinalDecision) {
+	e.mu.Lock()
+	activeID := e.activeYieldPositionID
+	e.mu.Unlock()
+
+	// ── Exit: risk too high, withdraw ────────────────────────────────────────
+	if score.RiskLevel > e.cfg.YieldExitRisk && activeID != 0 {
+		pos, err := e.store.ActiveYieldPosition()
+		if err != nil || pos == nil {
+			e.mu.Lock()
+			e.activeYieldPositionID = 0
+			e.mu.Unlock()
+			return
+		}
+
+		elapsed := time.Since(pos.DepositedAt).Seconds()
+		earned := pos.Amount * (pos.EntryAPY / 100) / (365.25 * 24 * 3600) * elapsed
+
+		if err := e.store.CloseYieldPosition(pos.ID, earned, "simulated-exit"); err != nil {
+			log.Printf("[yield] close position failed: %v", err)
+			return
+		}
+		e.mu.Lock()
+		e.activeYieldPositionID = 0
+		e.mu.Unlock()
+
+		log.Printf("[yield] EXIT: risk=%.1f > %.1f — withdrew %.4f %s from %s | earned=%.4f",
+			score.RiskLevel, e.cfg.YieldExitRisk, pos.Amount, pos.Token, pos.Protocol, earned)
+
+		if e.alerter != nil {
+			e.alerter.Send("yield_exit", alerts.LevelWarning,
+				fmt.Sprintf("⚡ Yield position withdrawn\nRisk rose to *%.0f* (threshold %.0f)\nProtocol: %s | Token: %s\nEarned: *$%.4f* over %s",
+					score.RiskLevel, e.cfg.YieldExitRisk,
+					pos.Protocol, pos.Token, earned,
+					formatDuration(time.Since(pos.DepositedAt))))
+		}
+		return
+	}
+
+	// ── Entry: OPTIMIZE + low risk + no active position ──────────────────────
+	if activeID != 0 {
+		return // already in a position
+	}
+	if decision == nil || decision.Action != ai.ActionOptimize {
+		return
+	}
+	if score.RiskLevel > e.cfg.YieldEntryRisk {
+		return
+	}
+
+	// Find best opportunity
+	best := e.yieldAgg.BestFor(ctx, "USDC") // prefer USDC
+	if best == nil {
+		best = e.yieldAgg.BestFor(ctx, "USDT")
+	}
+	if best == nil || best.SupplyAPY < e.cfg.YieldMinAPY {
+		log.Printf("[yield] no suitable opportunity (min APY %.1f%%)", e.cfg.YieldMinAPY)
+		return
+	}
+
+	amount := e.cfg.YieldDepositAmount
+
+	posID, err := e.store.SaveYieldPosition(
+		string(best.Protocol),
+		best.Token,
+		amount,
+		best.SupplyAPY,
+		"simulated-deposit",
+	)
+	if err != nil {
+		log.Printf("[yield] save position failed: %v", err)
+		return
+	}
+
+	e.mu.Lock()
+	e.activeYieldPositionID = posID
+	e.mu.Unlock()
+
+	log.Printf("[yield] ENTER: deposited %.0f %s into %s @ %.2f%% APY (simulated, posID=%d)",
+		amount, best.Token, best.DisplayName, best.SupplyAPY, posID)
+
+	if e.alerter != nil {
+		e.alerter.Send("yield_enter", alerts.LevelInfo,
+			fmt.Sprintf("💰 Yield position opened\nProtocol: *%s* | Token: %s\nAmount: *$%.0f* @ *%.2f%%* APY\nRisk: %.0f (safe to enter)",
+				best.DisplayName, best.Token, amount, best.SupplyAPY, score.RiskLevel))
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%.1fh", d.Hours())
 }
 
 func strategyName(mode uint8) string {

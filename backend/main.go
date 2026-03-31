@@ -19,6 +19,7 @@ import (
 	"stableguard-backend/risk"
 	solanaexec "stableguard-backend/solana"
 	"stableguard-backend/store"
+	"stableguard-backend/yield"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -64,10 +65,14 @@ func main() {
 	scorer := risk.NewWindowedScorer(20)
 	agents := ai.New(cfg.AnthropicAPIKey)
 
+	// ── Yield Aggregator ──────────────────────────────────────────────────
+	yieldAgg := yield.NewAggregator()
+
 	pipe := pipeline.New(streamer, scorer, agents, executor, cfg).
 		WithStore(db).
 		WithAlerter(alerter).
-		WithHub(feedHub)
+		WithHub(feedHub).
+		WithYield(yieldAgg)
 
 	// Graceful shutdown context
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -105,11 +110,15 @@ func main() {
 		AllowHeaders: "Origin, Content-Type, Accept",
 	}))
 
+	log.Printf("  Yield Opt.  : enabled=%v minAPY=%.1f%% entryRisk=%.0f exitRisk=%.0f",
+		cfg.YieldEnabled, cfg.YieldMinAPY, cfg.YieldEntryRisk, cfg.YieldExitRisk)
+
 	handler := api.New(pythMonitor, llmClient, executor).
 		WithPipeline(pipe).
 		WithStore(db).
 		WithAlerter(alerter).
-		WithHub(feedHub)
+		WithHub(feedHub).
+		WithYield(yieldAgg)
 	handler.Register(app)
 
 	// Shutdown Fiber when context is cancelled

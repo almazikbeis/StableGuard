@@ -31,6 +31,14 @@ export interface FeedMessage {
     risk_analysis: string;
     yield_analysis: string;
   };
+  yield_position?: {
+    protocol: string;
+    token: string;
+    amount: number;
+    entry_apy: number;
+    earned: number;
+    deposited_at: number;
+  };
   exec_sig?: string;
   ping?: boolean;
 }

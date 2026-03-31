@@ -17,6 +17,7 @@ import (
 	"stableguard-backend/risk"
 	solanaexec "stableguard-backend/solana"
 	"stableguard-backend/store"
+	"stableguard-backend/yield"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -26,10 +27,11 @@ type Handler struct {
 	pyth     *pyth.Monitor
 	llm      *llm.Client
 	executor *solanaexec.Executor
-	pipe     *pipeline.Engine // optional
-	store    *store.DB        // optional
-	alerter  *alerts.Client   // optional
-	feedHub  *hub.Hub         // optional — SSE broadcast hub
+	pipe     *pipeline.Engine    // optional
+	store    *store.DB           // optional
+	alerter  *alerts.Client      // optional
+	feedHub  *hub.Hub            // optional — SSE broadcast hub
+	yieldAgg *yield.Aggregator   // optional — yield APY aggregator
 }
 
 // New creates a new API handler.
@@ -52,6 +54,12 @@ func (h *Handler) WithStore(s *store.DB) *Handler {
 // WithAlerter attaches the alert client to the handler.
 func (h *Handler) WithAlerter(a *alerts.Client) *Handler {
 	h.alerter = a
+	return h
+}
+
+// WithYield attaches the yield aggregator to the handler.
+func (h *Handler) WithYield(agg *yield.Aggregator) *Handler {
+	h.yieldAgg = agg
 	return h
 }
 
@@ -92,11 +100,54 @@ func (h *Handler) Register(app *fiber.App) {
 	// Real-time SSE feed
 	v1.Get("/stream", h.streamFeed)
 
+	// Yield optimizer
+	v1.Get("/yield/opportunities", h.yieldOpportunities)
+	v1.Get("/yield/position", h.yieldPosition)
+	v1.Get("/yield/history", h.yieldHistory)
+
 	// Settings
 	v1.Get("/settings", h.getSettings)
 	v1.Post("/settings/telegram", h.setTelegram)
 	v1.Post("/settings/discord", h.setDiscord)
 	v1.Post("/settings/test-alert", h.testAlert)
+}
+
+// GET /api/v1/yield/opportunities — live APY from Kamino, Marginfi, Drift
+func (h *Handler) yieldOpportunities(c *fiber.Ctx) error {
+	if h.yieldAgg == nil {
+		return c.JSON(fiber.Map{"opportunities": []interface{}{}})
+	}
+	opps := h.yieldAgg.Opportunities(c.Context())
+	return c.JSON(fiber.Map{
+		"opportunities": opps,
+		"count":         len(opps),
+		"updated_at":    time.Now().Unix(),
+	})
+}
+
+// GET /api/v1/yield/position — currently active yield position
+func (h *Handler) yieldPosition(c *fiber.Ctx) error {
+	if h.store == nil {
+		return c.JSON(fiber.Map{"position": nil})
+	}
+	pos, err := h.store.ActiveYieldPosition()
+	if err != nil {
+		return c.JSON(fiber.Map{"position": nil})
+	}
+	return c.JSON(fiber.Map{"position": pos})
+}
+
+// GET /api/v1/yield/history — recent yield positions
+func (h *Handler) yieldHistory(c *fiber.Ctx) error {
+	if h.store == nil {
+		return c.JSON(fiber.Map{"positions": []interface{}{}})
+	}
+	limit, _ := strconv.Atoi(c.Query("limit", "20"))
+	positions, err := h.store.RecentYieldPositions(limit)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"positions": positions})
 }
 
 // GET /api/v1/health
