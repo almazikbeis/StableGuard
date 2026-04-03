@@ -43,10 +43,6 @@ pub fn handle_update_threshold(ctx: Context<UpdateThreshold>, new_threshold: u64
         timestamp,
     });
 
-    msg!(
-        "Threshold updated: {} → {}",
-        old_threshold,
-        new_threshold
-    );
+    msg!("Threshold updated: {} → {}", old_threshold, new_threshold);
     Ok(())
 }

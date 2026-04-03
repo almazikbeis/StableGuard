@@ -14,6 +14,7 @@ import (
 	"stableguard-backend/config"
 	"stableguard-backend/hub"
 	"stableguard-backend/llm"
+	"stableguard-backend/onchain"
 	"stableguard-backend/pipeline"
 	"stableguard-backend/pyth"
 	"stableguard-backend/risk"
@@ -68,6 +69,22 @@ func main() {
 	// ── Yield Aggregator ──────────────────────────────────────────────────
 	yieldAgg := yield.NewAggregator()
 
+	// ── On-chain Whale Aggregator ─────────────────────────────────────────
+	whaleAgg := onchain.NewAggregator()
+
+	// ── Slippage Analyzer ─────────────────────────────────────────────────
+	slippageAnal := onchain.NewSlippageAnalyzer()
+
+	// ── Optional: auto-delegate agent pubkey from config ──────────────────
+	if cfg.AgentPubkey != "" {
+		agentPK, err := solanaexec.ParsePublicKey(cfg.AgentPubkey)
+		if err != nil {
+			log.Printf("WARNING: invalid AGENT_PUBKEY=%s: %v", cfg.AgentPubkey, err)
+		} else {
+			log.Printf("  Agent PK    : %s (will delegate on startup if needed)", agentPK)
+		}
+	}
+
 	pipe := pipeline.New(streamer, scorer, agents, executor, cfg).
 		WithStore(db).
 		WithAlerter(alerter).
@@ -114,11 +131,14 @@ func main() {
 		cfg.YieldEnabled, cfg.YieldMinAPY, cfg.YieldEntryRisk, cfg.YieldExitRisk)
 
 	handler := api.New(pythMonitor, llmClient, executor).
+		WithConfig(cfg).
 		WithPipeline(pipe).
 		WithStore(db).
 		WithAlerter(alerter).
 		WithHub(feedHub).
-		WithYield(yieldAgg)
+		WithYield(yieldAgg).
+		WithWhales(whaleAgg).
+		WithSlippage(slippageAnal)
 	handler.Register(app)
 
 	// Shutdown Fiber when context is cancelled

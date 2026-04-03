@@ -21,26 +21,31 @@ const MaxTokens = 8
 
 // Executor submits on-chain transactions to the StableGuard program.
 type Executor struct {
-	rpcClient *rpc.Client
-	wallet    solana.PrivateKey
-	programID solana.PublicKey
+	rpcClient   *rpc.Client
+	wallet      solana.PrivateKey
+	programID   solana.PublicKey
+	authorityPK solana.PublicKey // explicit authority for PDA derivation (may differ from wallet when wallet = agent)
 }
 
-// VaultState mirrors the on-chain VaultState account layout (660 bytes after discriminator).
+// VaultState mirrors the on-chain VaultState account layout.
 type VaultState struct {
-	Authority          [32]byte
-	Mints              [MaxTokens][32]byte
-	VaultTokens        [MaxTokens][32]byte
-	TotalDeposited     uint64
-	Balances           [MaxTokens]uint64
-	RebalanceThreshold uint64
-	MaxDeposit         uint64
-	DecisionCount      uint64
-	TotalRebalances    uint64
-	NumTokens          uint8
-	IsPaused           bool
-	StrategyMode       uint8
-	Bump               uint8
+	Authority                [32]byte
+	Mints                    [MaxTokens][32]byte
+	VaultTokens              [MaxTokens][32]byte
+	TotalDeposited           uint64
+	Balances                 [MaxTokens]uint64
+	RebalanceThreshold       uint64
+	MaxDeposit               uint64
+	DecisionCount            uint64
+	TotalRebalances          uint64
+	NumTokens                uint8
+	IsPaused                 bool
+	StrategyMode             uint8
+	Bump                     uint8
+	DelegatedAgent           [32]byte
+	CircuitBreakerThreshold  uint64
+	LastPrice                uint64
+	PositionEpoch            uint64
 }
 
 // New creates a new Solana executor.
@@ -57,11 +62,13 @@ func New(rpcURL, walletKeyPath, programIDStr string) (*Executor, error) {
 		return nil, fmt.Errorf("invalid program id: %w", err)
 	}
 
-	return &Executor{
+	e := &Executor{
 		rpcClient: client,
 		wallet:    privKey,
 		programID: programID,
-	}, nil
+	}
+	e.authorityPK = privKey.PublicKey()
+	return e, nil
 }
 
 // DeriveVaultPDA derives the vault PDA for the given authority.
@@ -120,8 +127,8 @@ func (e *Executor) FetchVaultState(ctx context.Context, vaultPDA solana.PublicKe
 	// discriminator(8) + authority(32) + mints(256) + vault_tokens(256)
 	// + total_deposited(8) + balances(64) + threshold(8) + max_deposit(8)
 	// + decision_count(8) + total_rebalances(8) + num_tokens(1) + is_paused(1) + strategy(1) + bump(1)
-	// = 660 bytes total (+ 8 discriminator = 668 raw)
-	const minLen = 8 + 32 + 32*MaxTokens + 32*MaxTokens + 8 + 8*MaxTokens + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 1
+	// + delegated_agent(32) + circuit_breaker_threshold(8) + last_price(8) + position_epoch(8)
+	const minLen = 8 + 32 + 32*MaxTokens + 32*MaxTokens + 8 + 8*MaxTokens + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 1 + 32 + 8 + 8 + 8
 	if len(data) < minLen {
 		return nil, fmt.Errorf("vault account data too short: %d bytes (need %d)", len(data), minLen)
 	}
@@ -165,6 +172,16 @@ func (e *Executor) FetchVaultState(ctx context.Context, vaultPDA solana.PublicKe
 	vs.StrategyMode = data[offset]
 	offset++
 	vs.Bump = data[offset]
+	offset++
+
+	// New fields (added in v2 security upgrade)
+	copy(vs.DelegatedAgent[:], data[offset:offset+32])
+	offset += 32
+	vs.CircuitBreakerThreshold = binary.LittleEndian.Uint64(data[offset:])
+	offset += 8
+	vs.LastPrice = binary.LittleEndian.Uint64(data[offset:])
+	offset += 8
+	vs.PositionEpoch = binary.LittleEndian.Uint64(data[offset:])
 
 	return vs, nil
 }
@@ -444,6 +461,11 @@ func PubkeyToBase58(b [32]byte) string {
 	return solana.PublicKeyFromBytes(b[:]).String()
 }
 
+// ParsePublicKey parses a base58-encoded Solana public key.
+func ParsePublicKey(s string) (solana.PublicKey, error) {
+	return solana.PublicKeyFromBase58(s)
+}
+
 func loadWallet(path string) (solana.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -457,6 +479,54 @@ func loadWallet(path string) (solana.PrivateKey, error) {
 	}
 
 	return solana.PrivateKey(keyBytes), nil
+}
+
+// SetAuthorityPK overrides the authority public key used for PDA derivation.
+// Use this when the wallet is the delegated agent (not the vault authority).
+func (e *Executor) SetAuthorityPK(pk solana.PublicKey) {
+	e.authorityPK = pk
+}
+
+// SendDelegateAgent submits a delegate_agent instruction on-chain.
+// Only the vault authority can call this.
+func (e *Executor) SendDelegateAgent(ctx context.Context, agentPubkey solana.PublicKey) (string, error) {
+	authority := e.wallet.PublicKey()
+	vaultPDA, _, err := e.DeriveVaultPDA(authority)
+	if err != nil {
+		return "", fmt.Errorf("derive vault pda: %w", err)
+	}
+
+	disc := anchorDiscriminator("delegate_agent")
+	// agent_pubkey is a Pubkey (32 bytes)
+	data := make([]byte, 8+32)
+	copy(data[0:8], disc)
+	copy(data[8:], agentPubkey.Bytes())
+
+	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
+		{PublicKey: authority, IsSigner: true, IsWritable: true},
+		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
+	})
+}
+
+// SendUpdatePriceAndCheck submits an update_price_and_check instruction on-chain.
+// Can be called by either the vault authority or the delegated agent.
+// The vault PDA is derived from authorityPK (not necessarily the wallet).
+func (e *Executor) SendUpdatePriceAndCheck(ctx context.Context, price uint64) (string, error) {
+	signer := e.wallet.PublicKey()
+	vaultPDA, _, err := e.DeriveVaultPDA(e.authorityPK)
+	if err != nil {
+		return "", fmt.Errorf("derive vault pda: %w", err)
+	}
+
+	disc := anchorDiscriminator("update_price_and_check")
+	data := make([]byte, 8+8)
+	copy(data[0:8], disc)
+	binary.LittleEndian.PutUint64(data[8:], price)
+
+	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
+		{PublicKey: signer, IsSigner: true, IsWritable: true},
+		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
+	})
 }
 
 // SendTogglePause submits a toggle_pause instruction on-chain.

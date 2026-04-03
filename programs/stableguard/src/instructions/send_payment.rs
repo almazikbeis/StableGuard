@@ -37,11 +37,7 @@ pub struct SendPayment<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-pub fn handle_send_payment(
-    ctx: Context<SendPayment>,
-    token_index: u8,
-    amount: u64,
-) -> Result<()> {
+pub fn handle_send_payment(ctx: Context<SendPayment>, token_index: u8, amount: u64) -> Result<()> {
     require!(!ctx.accounts.vault.is_paused, StableGuardError::VaultPaused);
     require!(amount > 0, StableGuardError::InvalidDepositAmount);
     require!(
@@ -57,8 +53,8 @@ pub fn handle_send_payment(
     );
 
     let authority_key = ctx.accounts.vault.authority;
-    let bump          = ctx.accounts.vault.bump;
-    let vault_key     = ctx.accounts.vault.key();
+    let bump = ctx.accounts.vault.bump;
+    let vault_key = ctx.accounts.vault.key();
     let recipient_key = ctx.accounts.recipient_token_account.key();
 
     {
@@ -79,8 +75,8 @@ pub fn handle_send_payment(
     let cpi_ctx = CpiContext::new_with_signer(
         ctx.accounts.token_program.to_account_info(),
         Transfer {
-            from:      ctx.accounts.vault_token_account.to_account_info(),
-            to:        ctx.accounts.recipient_token_account.to_account_info(),
+            from: ctx.accounts.vault_token_account.to_account_info(),
+            to: ctx.accounts.recipient_token_account.to_account_info(),
             authority: ctx.accounts.vault.to_account_info(),
         },
         signer,

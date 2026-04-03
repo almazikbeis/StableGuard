@@ -25,14 +25,14 @@ const features = [
   },
   {
     icon: Brain,
-    title: "Multi-Agent Claude AI",
-    desc: "Three Claude Haiku agents analyze risk, yield opportunities, and final strategy in parallel.",
+    title: "Configurable AI Autonomy",
+    desc: "Choose how much authority AI gets: manual, guarded, balanced, or yield-max control modes.",
     color: "#8b5cf6",
   },
   {
     icon: Shield,
-    title: "Auto Circuit Breaker",
-    desc: "Vault auto-pauses at 1.5% depeg. Critical alerts fire at 3%. No manual action required.",
+    title: "Safety-First Guardrails",
+    desc: "Circuit breakers, emergency pause, and risk thresholds keep autonomy bounded by explicit policy.",
     color: "#f97316",
   },
   {
@@ -49,8 +49,8 @@ const features = [
   },
   {
     icon: Activity,
-    title: "Solana Devnet",
-    desc: "Anchor smart contract with on-chain rebalance records, vault state, and token registry.",
+    title: "Policy + Execution Split",
+    desc: "Risk signals, AI decisions, and on-chain vault records are separated clearly for safer operation.",
     color: "#6366f1",
   },
 ];
@@ -58,15 +58,15 @@ const features = [
 const stats = [
   { value: "4",    label: "Stablecoins tracked" },
   { value: "<1s",  label: "Price latency" },
-  { value: "24/7", label: "AI monitoring" },
-  { value: "3",    label: "Claude agents" },
+  { value: "24/7", label: "Risk monitoring" },
+  { value: "4",    label: "Control modes" },
 ];
 
 const pipeline = [
   { icon: Zap,       label: "Pyth Oracle",      sub: "Real-time prices",  color: "#f59e0b" },
   { icon: BarChart2, label: "Risk Engine v2",    sub: "Score + signals",   color: "#06b6d4" },
-  { icon: Brain,     label: "3 Claude Agents",   sub: "AI decision",       color: "#8b5cf6" },
-  { icon: Shield,    label: "Vault Action",       sub: "On-chain tx",       color: "#f97316" },
+  { icon: Brain,     label: "AI Policy Layer",   sub: "Mode-aware decision", color: "#8b5cf6" },
+  { icon: Shield,    label: "Vault Policy",      sub: "Record / protect",  color: "#f97316" },
 ];
 
 const ticker = [
@@ -138,14 +138,19 @@ export default function LandingPage() {
             <Shield size={16} className="text-white" />
           </div>
           <span className="font-display font-bold text-gray-950 text-[15px]">StableGuard</span>
-          <span className="hidden sm:inline text-xs text-gray-400 font-normal">· Stablecoin Risk Monitor</span>
+          <span className="hidden sm:inline text-xs text-gray-400 font-normal">· Configurable AI Autonomy For Stablecoin Vaults</span>
         </div>
-        <Link
-          href="/dashboard"
-          className="flex items-center gap-1.5 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors shadow-sm shadow-orange-200"
-        >
-          Launch App <ArrowRight size={14} />
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link href="/auth/login" className="text-sm font-medium text-gray-500 hover:text-gray-900 transition-colors px-3 py-2">
+            Sign in
+          </Link>
+          <Link
+            href="/auth/register"
+            className="flex items-center gap-1.5 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors shadow-sm shadow-orange-200"
+          >
+            Get started <ArrowRight size={14} />
+          </Link>
+        </div>
       </nav>
 
       {/* ── Hero ── */}
@@ -180,9 +185,9 @@ export default function LandingPage() {
           transition={{ delay: 0.2, type: "spring", stiffness: 80, damping: 20 }}
           className="text-lg text-gray-500 max-w-lg leading-relaxed mb-10"
         >
-          Real-time Pyth prices. Multi-agent Claude AI. Auto circuit-breaker.
+          Real-time Pyth prices. Explainable AI policy modes. Safety-first vault orchestration.
           <br className="hidden sm:block" />
-          Monitor your vault 24/7 without lifting a finger.
+          From manual control to emergency-only protection to active optimization.
         </motion.p>
 
         {/* CTA */}
@@ -191,14 +196,22 @@ export default function LandingPage() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.3 }}
         >
-          <Link
-            href="/dashboard"
-            className="inline-flex items-center gap-2.5 bg-orange-500 hover:bg-orange-600 active:scale-[0.98] text-white font-bold text-base px-8 py-4 rounded-2xl transition-all shadow-xl shadow-orange-200 hover:shadow-orange-300 hover:scale-[1.02]"
-          >
-            <TrendingUp size={18} />
-            Launch Dashboard
-            <ArrowRight size={16} />
-          </Link>
+          <div className="flex flex-col sm:flex-row items-center gap-3">
+            <Link
+              href="/auth/register"
+              className="inline-flex items-center gap-2.5 bg-orange-500 hover:bg-orange-600 active:scale-[0.98] text-white font-bold text-base px-8 py-4 rounded-2xl transition-all shadow-xl shadow-orange-200 hover:shadow-orange-300 hover:scale-[1.02]"
+            >
+              <TrendingUp size={18} />
+              Get started free
+              <ArrowRight size={16} />
+            </Link>
+            <Link
+              href="/dashboard"
+              className="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-900 transition-colors"
+            >
+              View live demo →
+            </Link>
+          </div>
         </motion.div>
 
         {/* Floating mock cards */}
@@ -232,9 +245,9 @@ export default function LandingPage() {
             className="bg-orange-50 border border-orange-200 rounded-2xl p-5 text-left animate-float"
             style={{ animationDelay: "3.5s" }}
           >
-            <p className="text-xs text-orange-600 font-semibold mb-2 uppercase tracking-wide">AI Decision</p>
-            <p className="font-display font-extrabold text-3xl text-orange-700">HOLD</p>
-            <p className="text-xs text-orange-400 mt-1.5 font-medium">3 agents · high confidence</p>
+            <p className="text-xs text-orange-600 font-semibold mb-2 uppercase tracking-wide">Control Mode</p>
+            <p className="font-display font-extrabold text-3xl text-orange-700">GUARDED</p>
+            <p className="text-xs text-orange-400 mt-1.5 font-medium">AI acts only in high-risk scenarios</p>
           </div>
         </motion.div>
       </section>
@@ -301,8 +314,8 @@ export default function LandingPage() {
               Everything to protect your vault
             </h2>
             <p className="text-gray-500 max-w-xl mx-auto text-base leading-relaxed">
-              Built for DeFi teams who can't afford a depeg event.
-              StableGuard monitors 24/7 and reacts before you notice.
+              Built for DeFi teams that need programmable trust.
+              StableGuard lets you choose when AI should only observe, when it should protect, and when it can optimize.
             </p>
           </motion.div>
 
@@ -324,7 +337,7 @@ export default function LandingPage() {
             className="text-center mb-14"
           >
             <h2 className="font-display font-bold text-2xl text-gray-950 mb-2">How it works</h2>
-            <p className="text-sm text-gray-400">From raw price feed to on-chain action in seconds</p>
+            <p className="text-sm text-gray-400">From raw price feed to policy-aware vault orchestration</p>
           </motion.div>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 sm:gap-6">
@@ -366,17 +379,17 @@ export default function LandingPage() {
           className="max-w-xl mx-auto"
         >
           <h2 className="font-display font-extrabold text-[44px] leading-[1.1] text-gray-950 mb-5 tracking-tight">
-            Start monitoring{" "}
-            <span className="text-orange-500">right now</span>
+            Start with the{" "}
+            <span className="text-orange-500">right control mode</span>
           </h2>
           <p className="text-gray-500 mb-10 leading-relaxed text-base">
-            No sign-up required. Run the backend and your vault is protected in minutes.
+            Connect your wallet, choose your autonomy level, and let StableGuard enforce your risk policy around the clock.
           </p>
           <Link
-            href="/dashboard"
-            className="inline-flex items-center gap-2 bg-gray-950 hover:bg-gray-800 text-white font-bold px-9 py-4.5 rounded-2xl transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg"
+            href="/auth/register"
+            className="inline-flex items-center gap-2 bg-gray-950 hover:bg-gray-800 text-white font-bold px-9 py-4 rounded-2xl transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg"
           >
-            Open Dashboard <ArrowRight size={16} />
+            Create free account <ArrowRight size={16} />
           </Link>
         </motion.div>
       </section>
@@ -391,7 +404,7 @@ export default function LandingPage() {
             <span className="text-sm font-semibold text-gray-700">StableGuard</span>
           </div>
           <p className="text-xs text-gray-400">
-            Solana Devnet · Pyth Network · Claude AI · MIT License
+            Solana Devnet · Pyth Network · Configurable AI Control · MIT License
           </p>
           <Link href="/dashboard" className="text-xs text-gray-400 hover:text-orange-500 transition-colors">
             Dashboard →

@@ -1,7 +1,16 @@
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v1";
 
+function authHeaders(): HeadersInit {
+  if (typeof window === "undefined") return {};
+  const token = window.localStorage.getItem("sg_jwt");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
+  const res = await fetch(`${BASE}${path}`, {
+    cache: "no-store",
+    headers: authHeaders(),
+  });
   if (!res.ok) throw new Error(`API ${path} → ${res.status}`);
   return res.json();
 }
@@ -9,7 +18,7 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`API POST ${path} → ${res.status}`);
@@ -55,6 +64,8 @@ export interface PipelineStatus {
     yield_analysis: string;
   } | null;
   last_exec_sig: string;
+  last_exec_status?: string;
+  last_exec_note?: string;
 }
 
 export interface VaultState {
@@ -135,12 +146,105 @@ export interface YieldPosition {
   is_active: boolean;
 }
 
+export interface Goal {
+  id: number;
+  name: string;
+  goal_type: string;
+  target: number;
+  progress: number;
+  currency: string;
+  deadline?: number;
+  created_at: number;
+  completed_at?: number;
+  is_active: boolean;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatResponse {
+  reply: string;
+  action?: {
+    type: string;
+    params: Record<string, unknown>;
+    confirm: boolean;
+    label: string;
+  };
+  tokens_used?: number;
+}
+
+export interface IntentConfig {
+  strategy_mode: number;
+  risk_threshold: number;
+  yield_entry_risk: number;
+  yield_exit_risk: number;
+  circuit_breaker_pct: number;
+  explanation: string;
+  strategy_name: string;
+}
+
+export type ControlMode = "MANUAL" | "GUARDED" | "BALANCED" | "YIELD_MAX";
+
+export interface SettingsResponse {
+  alerts_enabled: boolean;
+  circuit_breaker_enabled: boolean;
+  pipeline_running: boolean;
+  control_mode: ControlMode | "UNKNOWN";
+  strategy_mode: number;
+  strategy_name: string;
+  auto_execute: boolean;
+  yield_enabled: boolean;
+  yield_entry_risk: number;
+  yield_exit_risk: number;
+  circuit_breaker_pause_pct: number;
+  alert_risk_threshold: number;
+  hub_subscribers: number;
+}
+
+export interface AppliedAutopilot {
+  ok: boolean;
+  control_mode: ControlMode | "UNKNOWN";
+  strategy_mode: number;
+  strategy_name: string;
+  auto_execute: boolean;
+  yield_enabled: boolean;
+  yield_entry_risk: number;
+  yield_exit_risk: number;
+  circuit_breaker_pct: number;
+  risk_threshold: number;
+  set_strategy_sig: string;
+  update_threshold_sig: string;
+  description?: string;
+}
+
 // ── API calls ──────────────────────────────────────────────────────────────
+
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`API PATCH ${path} → ${res.status}`);
+  return res.json();
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(`API DELETE ${path} → ${res.status}`);
+  return res.json();
+}
 
 export const api = {
   tokens: () => get<TokensResponse>("/tokens"),
   pipeline: () => get<PipelineStatus>("/pipeline/status"),
   vault: () => get<VaultState>("/vault"),
+  settings: () => get<SettingsResponse>("/settings"),
   priceHistory: (symbol: string, limit = 200) =>
     get<{ symbol: string; data: PricePoint[] }>(`/history/prices?symbol=${symbol}&limit=${limit}`),
   decisions: (limit = 20) =>
@@ -149,6 +253,17 @@ export const api = {
     get<{ rebalances: RebalanceRow[] }>(`/history/rebalances?limit=${limit}`),
   stats: () => get<HistoryStats>("/history/stats"),
   setStrategy: (mode: number) => post("/strategy", { mode }),
+  applyControlMode: (mode: ControlMode) =>
+    post<AppliedAutopilot>("/settings/control-mode", { mode }),
+  applyAutopilot: (body: {
+    strategy_mode: number;
+    risk_threshold: number;
+    yield_entry_risk: number;
+    yield_exit_risk: number;
+    circuit_breaker_pct: number;
+    auto_execute?: boolean;
+    yield_enabled?: boolean;
+  }) => post<AppliedAutopilot>("/settings/autopilot", body),
   rebalance: (from_index: number, to_index: number, amount: number) =>
     post("/rebalance", { from_index, to_index, amount }),
 
@@ -159,4 +274,22 @@ export const api = {
     get<{ position: YieldPosition | null }>("/yield/position"),
   yieldHistory: (limit = 20) =>
     get<{ positions: YieldPosition[] }>(`/yield/history?limit=${limit}`),
+
+  // Goals
+  goals: () => get<{ goals: Goal[]; total_earned: number }>("/goals"),
+  createGoal: (name: string, goal_type: string, target: number, deadline?: number) =>
+    post<{ id: number }>("/goals", { name, goal_type, target, deadline }),
+  updateGoalProgress: (id: number, progress: number) =>
+    patch<{ ok: boolean }>(`/goals/${id}/progress`, { progress }),
+  deleteGoal: (id: number) => del<{ ok: boolean }>(`/goals/${id}`),
+
+  // AI Chat & Intent
+  chat: (message: string, history: ChatMessage[]) =>
+    post<ChatResponse>("/chat", { message, history }),
+  parseIntent: (intent: string) =>
+    post<IntentConfig>("/intent", { intent }),
+
+  setThreshold: (rebalance_threshold: number) =>
+    post("/threshold", { rebalance_threshold }),
+  pauseVault: () => post("/emergency", {}),
 };

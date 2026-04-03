@@ -30,6 +30,14 @@ pub struct VaultState {
     pub strategy_mode: u8,
     /// PDA bump
     pub bump: u8,
+    /// Delegated agent allowed to call rebalance/update_price without being authority
+    pub delegated_agent: Pubkey,
+    /// On-chain circuit breaker threshold (e.g. 998000 = $0.998 with 6 decimals); 0 = disabled
+    pub circuit_breaker_threshold: u64,
+    /// Last price pushed by the hot path (in 6-decimal fixed point)
+    pub last_price: u64,
+    /// Monotonic epoch for invalidating stale user positions after emergency exits.
+    pub position_epoch: u64,
 }
 
 impl VaultState {
@@ -46,8 +54,12 @@ impl VaultState {
         + 1                         // num_tokens
         + 1                         // is_paused
         + 1                         // strategy_mode
-        + 1;                        // bump
-    // Total: 660 bytes
+        + 1                         // bump
+        + 32                        // delegated_agent
+        + 8                         // circuit_breaker_threshold
+        + 8                         // last_price
+        + 8; // position_epoch
+             // Total: 716 bytes
 
     pub fn get_total_value(&self) -> u64 {
         self.balances[..self.num_tokens as usize]
@@ -82,5 +94,10 @@ impl VaultState {
             1 => "yield",
             _ => "unknown",
         }
+    }
+
+    /// Returns true if the given key is either the vault authority or the delegated agent.
+    pub fn is_authorized_agent(&self, key: &Pubkey) -> bool {
+        key == &self.authority || key == &self.delegated_agent
     }
 }

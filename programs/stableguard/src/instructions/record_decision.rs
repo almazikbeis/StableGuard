@@ -35,7 +35,10 @@ pub struct RecordDecision<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handle_record_decision(ctx: Context<RecordDecision>, params: RecordDecisionParams) -> Result<()> {
+pub fn handle_record_decision(
+    ctx: Context<RecordDecision>,
+    params: RecordDecisionParams,
+) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
     let decision = &mut ctx.accounts.decision_log;
 

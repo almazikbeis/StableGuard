@@ -34,11 +34,13 @@ pub struct EmergencyWithdraw<'info> {
 /// remaining_accounts layout (num_tokens = N):
 ///   [0..N)   — vault token accounts (in index order)
 ///   [N..2N)  — authority token accounts (same order)
-pub fn handle_emergency_withdraw<'info>(ctx: Context<'_, '_, '_, 'info, EmergencyWithdraw<'info>>) -> Result<()> {
+pub fn handle_emergency_withdraw<'info>(
+    ctx: Context<'_, '_, '_, 'info, EmergencyWithdraw<'info>>,
+) -> Result<()> {
     let authority_key = ctx.accounts.vault.authority;
-    let bump          = ctx.accounts.vault.bump;
-    let vault_key     = ctx.accounts.vault.key();
-    let num_tokens    = ctx.accounts.vault.num_tokens as usize;
+    let bump = ctx.accounts.vault.bump;
+    let vault_key = ctx.accounts.vault.key();
+    let num_tokens = ctx.accounts.vault.num_tokens as usize;
 
     require!(
         ctx.remaining_accounts.len() >= 2 * num_tokens,
@@ -49,13 +51,13 @@ pub fn handle_emergency_withdraw<'info>(ctx: Context<'_, '_, '_, 'info, Emergenc
     let signer = &[seeds];
 
     let token_prog_info = ctx.accounts.token_program.to_account_info();
-    let vault_info      = ctx.accounts.vault.to_account_info();
+    let vault_info = ctx.accounts.vault.to_account_info();
 
     let mut total_drained: u64 = 0;
 
     for i in 0..num_tokens {
         let vault_token_info = &ctx.remaining_accounts[i];
-        let auth_token_info  = &ctx.remaining_accounts[num_tokens + i];
+        let auth_token_info = &ctx.remaining_accounts[num_tokens + i];
 
         // Read on-chain SPL balance without taking ownership
         let amount = {
@@ -71,8 +73,8 @@ pub fn handle_emergency_withdraw<'info>(ctx: Context<'_, '_, '_, 'info, Emergenc
             let cpi_ctx = CpiContext::new_with_signer(
                 token_prog_info.clone(),
                 Transfer {
-                    from:      vault_token_info.clone(),
-                    to:        auth_token_info.clone(),
+                    from: vault_token_info.clone(),
+                    to: auth_token_info.clone(),
                     authority: vault_info.clone(),
                 },
                 signer,
@@ -88,6 +90,10 @@ pub fn handle_emergency_withdraw<'info>(ctx: Context<'_, '_, '_, 'info, Emergenc
         vault.balances[i] = 0;
     }
     vault.total_deposited = 0;
+    vault.position_epoch = vault
+        .position_epoch
+        .checked_add(1)
+        .ok_or(StableGuardError::MathOverflow)?;
 
     let timestamp = Clock::get()?.unix_timestamp;
     emit!(EmergencyWithdrawEvent {

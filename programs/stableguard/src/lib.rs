@@ -13,7 +13,10 @@ pub mod stableguard {
     use super::*;
 
     // ── Core ──────────────────────────────────────────────────────────────
-    pub fn initialize_vault(ctx: Context<InitializeVault>, params: InitializeVaultParams) -> Result<()> {
+    pub fn initialize_vault(
+        ctx: Context<InitializeVault>,
+        params: InitializeVaultParams,
+    ) -> Result<()> {
         instructions::initialize::handle_initialize_vault(ctx, params)
     }
 
@@ -45,7 +48,10 @@ pub mod stableguard {
         instructions::toggle_pause::handle_toggle_pause(ctx)
     }
 
-    pub fn record_decision(ctx: Context<RecordDecision>, params: RecordDecisionParams) -> Result<()> {
+    pub fn record_decision(
+        ctx: Context<RecordDecision>,
+        params: RecordDecisionParams,
+    ) -> Result<()> {
         instructions::record_decision::handle_record_decision(ctx, params)
     }
 
@@ -64,7 +70,23 @@ pub mod stableguard {
 
     /// Emergency withdraw drains all vault token accounts to authority.
     /// Pass vault token accounts [0..N] then authority accounts [N..2N] as remaining_accounts.
-    pub fn emergency_withdraw<'info>(ctx: Context<'_, '_, '_, 'info, EmergencyWithdraw<'info>>) -> Result<()> {
+    pub fn emergency_withdraw<'info>(
+        ctx: Context<'_, '_, '_, 'info, EmergencyWithdraw<'info>>,
+    ) -> Result<()> {
         instructions::emergency_withdraw::handle_emergency_withdraw(ctx)
+    }
+
+    /// Delegates an agent pubkey to the vault.
+    /// Only the vault authority can call this. The agent can then call
+    /// execute_rebalance and update_price_and_check on behalf of the vault.
+    pub fn delegate_agent(ctx: Context<DelegateAgent>, agent_pubkey: Pubkey) -> Result<()> {
+        instructions::delegate_agent::handle_delegate_agent(ctx, agent_pubkey)
+    }
+
+    /// Hot-path price update + on-chain circuit breaker.
+    /// Can be called by authority or delegated agent every ~400ms.
+    /// Auto-pauses vault if price < circuit_breaker_threshold.
+    pub fn update_price_and_check(ctx: Context<UpdatePriceAndCheck>, price: u64) -> Result<()> {
+        instructions::update_price::handle_update_price_and_check(ctx, price)
     }
 }

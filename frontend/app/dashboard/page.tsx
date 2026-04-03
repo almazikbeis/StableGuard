@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useRealtime, FeedMessage } from "@/lib/useRealtime";
-import { api, TokensResponse, VaultState, DecisionRow, HistoryStats } from "@/lib/api";
+import { api, TokensResponse, VaultState, DecisionRow, HistoryStats, SettingsResponse } from "@/lib/api";
 import { toast } from "@/lib/toast";
 import { Header } from "@/components/Header";
 import { Card } from "@/components/Card";
@@ -17,6 +17,11 @@ import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { YieldOpportunities } from "@/components/YieldOpportunities";
 import { YieldPosition } from "@/components/YieldPosition";
 import { DAOPayments } from "@/components/DAOPayments";
+import { AIChat } from "@/components/AIChat";
+import { AutopilotIntent } from "@/components/AutopilotIntent";
+import { SlippageAnalysis } from "@/components/SlippageAnalysis";
+import { WhaleIntelligence } from "@/components/WhaleIntelligence";
+import { PipelineVisualizer } from "@/components/PipelineVisualizer";
 import {
   BarChart2,
   Zap,
@@ -25,10 +30,39 @@ import {
   Activity,
   AlertTriangle,
   Settings,
+  Bot,
+  Lock,
 } from "lucide-react";
 import Link from "next/link";
 
 const STRATEGY_NAMES: Record<number, string> = { 0: "SAFE", 1: "BALANCED", 2: "YIELD" };
+const CONTROL_MODE_META: Record<string, { label: string; tone: string; blurb: string }> = {
+  MANUAL: {
+    label: "MANUAL",
+    tone: "text-gray-700",
+    blurb: "AI monitors, explains, and alerts. Human stays fully in control.",
+  },
+  GUARDED: {
+    label: "GUARDED",
+    tone: "text-green-700",
+    blurb: "AI only steps in for extreme-risk protection and depeg defense.",
+  },
+  BALANCED: {
+    label: "BALANCED",
+    tone: "text-blue-700",
+    blurb: "AI runs moderate automation with protection-first policy limits.",
+  },
+  YIELD_MAX: {
+    label: "YIELD MAX",
+    tone: "text-orange-700",
+    blurb: "AI takes the most initiative while keeping circuit breakers active.",
+  },
+  UNKNOWN: {
+    label: "UNKNOWN",
+    tone: "text-gray-500",
+    blurb: "Control profile unavailable.",
+  },
+};
 
 /* ── Animation variants ─────────────────────────────────────────────── */
 const container = {
@@ -65,6 +99,7 @@ export default function Dashboard() {
   const [vault, setVault] = useState<VaultState | null>(null);
   const [decisions, setDecisions] = useState<DecisionRow[]>([]);
   const [stats, setStats] = useState<HistoryStats | null>(null);
+  const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [priceHistory, setPriceHistory] = useState<{ ts: number; price: number; conf: number }[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState("USDC");
   const [refreshing, setRefreshing] = useState(false);
@@ -73,12 +108,13 @@ export default function Dashboard() {
 
   const loadStatic = useCallback(async () => {
     setRefreshing(true);
-    const [t, v, d, s, ph] = await Promise.allSettled([
+    const [t, v, d, s, ph, st] = await Promise.allSettled([
       api.tokens(),
       api.vault(),
       api.decisions(10),
       api.stats(),
       api.priceHistory(selectedSymbol, 120),
+      api.settings(),
     ]);
     if (t.status === "fulfilled") { setTokens(t.value); setError(null); }
     else setError(String((t as PromiseRejectedResult).reason));
@@ -86,6 +122,7 @@ export default function Dashboard() {
     if (d.status === "fulfilled") setDecisions(d.value.decisions ?? []);
     if (s.status === "fulfilled") setStats(s.value);
     if (ph.status === "fulfilled") setPriceHistory(ph.value.data ?? []);
+    if (st.status === "fulfilled") setSettings(st.value);
     setLastUpdate(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     setRefreshing(false);
   }, [selectedSymbol]);
@@ -120,6 +157,25 @@ export default function Dashboard() {
   }
 
   const currentDecision = liveData?.decision ?? null;
+  const controlMode = settings?.control_mode ?? "UNKNOWN";
+  const controlMeta = CONTROL_MODE_META[controlMode] ?? CONTROL_MODE_META.UNKNOWN;
+  const execStatus = liveData?.exec_status ?? "warming_up";
+  const execStatusLabel =
+    execStatus === "signal_only"
+      ? "Signal Only"
+      : execStatus === "executed"
+      ? "Executed"
+      : execStatus === "failed"
+      ? "Failed"
+      : "Standby";
+  const execStatusTone =
+    execStatus === "signal_only"
+      ? "text-amber-700"
+      : execStatus === "executed"
+      ? "text-green-700"
+      : execStatus === "failed"
+      ? "text-red-700"
+      : "text-gray-600";
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -132,6 +188,15 @@ export default function Dashboard() {
       />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+
+        {/* ── Pipeline Architecture Visualizer ── */}
+        <motion.div
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35 }}
+        >
+          <PipelineVisualizer liveData={liveData} connected={connected} />
+        </motion.div>
 
         {/* Error banner */}
         {error && (
@@ -208,10 +273,11 @@ export default function Dashboard() {
 
           <motion.div variants={card}>
             <StatCard
-              label="Strategy"
-              value={vault ? STRATEGY_NAMES[vault.strategy_mode] ?? "—" : "—"}
-              sub={vault?.is_paused ? "⏸ Paused" : "Active"}
-              icon={<Shield size={15} className="text-gray-400" />}
+              label="Control Mode"
+              value={controlMeta.label}
+              sub={controlMeta.blurb}
+              icon={<Bot size={15} className="text-gray-400" />}
+              accent={controlMeta.tone}
             />
           </motion.div>
         </motion.div>
@@ -223,6 +289,66 @@ export default function Dashboard() {
           animate="show"
           className="grid grid-cols-1 lg:grid-cols-3 gap-4"
         >
+          <motion.div variants={card} className="lg:col-span-3">
+            <Card title="AI Control Layer" subtitle="Configurable autonomy instead of one fixed autopilot">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Bot size={15} className={controlMeta.tone} />
+                    <p className={`text-sm font-semibold ${controlMeta.tone}`}>{controlMeta.label}</p>
+                  </div>
+                  <p className="text-sm text-gray-600 leading-relaxed">{controlMeta.blurb}</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <div className="rounded-lg bg-gray-50 p-2 border border-gray-100">
+                      <div className="text-[10px] text-gray-500">Auto execute</div>
+                      <div className="text-sm font-semibold text-gray-800">{settings?.auto_execute ? "Enabled" : "Disabled"}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-2 border border-gray-100">
+                      <div className="text-[10px] text-gray-500">Yield layer</div>
+                      <div className="text-sm font-semibold text-gray-800">{settings?.yield_enabled ? "Enabled" : "Disabled"}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Lock size={15} className={execStatusTone} />
+                    <p className={`text-sm font-semibold ${execStatusTone}`}>Execution Status</p>
+                  </div>
+                  <p className={`text-lg font-bold ${execStatusTone}`}>{execStatusLabel}</p>
+                  <p className="text-sm text-gray-600 leading-relaxed mt-2">
+                    {liveData?.exec_note ?? "Waiting for the next pipeline decision to report execution status."}
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Shield size={15} className="text-gray-600" />
+                    <p className="text-sm font-semibold text-gray-800">Policy Envelope</p>
+                  </div>
+                  <div className="space-y-2 text-sm text-gray-600">
+                    <div className="flex items-center justify-between gap-3">
+                      <span>Risk threshold</span>
+                      <span className="font-semibold text-gray-900">{settings?.alert_risk_threshold ?? "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span>Yield entry risk</span>
+                      <span className="font-semibold text-gray-900">{settings?.yield_entry_risk ?? "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span>Circuit breaker</span>
+                      <span className="font-semibold text-gray-900">{settings?.circuit_breaker_pause_pct ?? "—"}%</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span>On-chain strategy</span>
+                      <span className="font-semibold text-gray-900">{vault ? STRATEGY_NAMES[vault.strategy_mode] ?? "—" : "—"}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          </motion.div>
+
           <motion.div variants={card}>
             <Card className={`border ${riskBg(riskLevel)}`}>
               <div className="flex flex-col items-center gap-3">
@@ -359,6 +485,26 @@ export default function Dashboard() {
           <YieldOpportunities />
         </motion.div>
 
+        {/* ── Slippage Analysis + Whale Intelligence ── */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.38 }}
+          className="grid grid-cols-1 lg:grid-cols-2 gap-4"
+        >
+          <SlippageAnalysis symbol="USDC" />
+          <WhaleIntelligence />
+        </motion.div>
+
+        {/* ── Autopilot ── */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.40 }}
+        >
+          <AutopilotIntent />
+        </motion.div>
+
         {/* ── DAO Treasury Payments ── */}
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.42 }}>
           <DAOPayments />
@@ -430,6 +576,9 @@ export default function Dashboard() {
         </div>
 
       </main>
+
+      {/* ── Floating AI Chat ── */}
+      <AIChat />
     </div>
   );
 }

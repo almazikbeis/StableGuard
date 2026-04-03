@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::errors::StableGuardError;
+use crate::state::user_position::UserPosition;
 use crate::state::vault::VaultState;
 
 #[derive(Accounts)]
@@ -14,17 +15,27 @@ pub struct Deposit<'info> {
         seeds = [b"vault", vault.authority.as_ref()],
         bump = vault.bump
     )]
-    pub vault: Account<'info, VaultState>,
+    pub vault: Box<Account<'info, VaultState>>,
 
     /// User's source token account (must match the mint at token_index)
     #[account(mut)]
-    pub user_token_account: Account<'info, TokenAccount>,
+    pub user_token_account: Box<Account<'info, TokenAccount>>,
 
     /// Vault's token account for this token_index (validated in handler)
     #[account(mut)]
-    pub vault_token_account: Account<'info, TokenAccount>,
+    pub vault_token_account: Box<Account<'info, TokenAccount>>,
+
+    #[account(
+        init_if_needed,
+        payer = user,
+        space = UserPosition::LEN,
+        seeds = [b"user_position", vault.key().as_ref(), user.key().as_ref()],
+        bump
+    )]
+    pub user_position: Box<Account<'info, UserPosition>>,
 
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handle_deposit(ctx: Context<Deposit>, token_index: u8, amount: u64) -> Result<()> {
@@ -40,8 +51,35 @@ pub fn handle_deposit(ctx: Context<Deposit>, token_index: u8, amount: u64) -> Re
             == ctx.accounts.vault.vault_tokens[token_index as usize],
         StableGuardError::InvalidDepositAmount
     );
+    require!(
+        ctx.accounts.user_token_account.owner == ctx.accounts.user.key(),
+        StableGuardError::Unauthorized
+    );
+    require!(
+        ctx.accounts.user_token_account.mint == ctx.accounts.vault_token_account.mint,
+        StableGuardError::InvalidDepositAmount
+    );
 
     let vault = &mut ctx.accounts.vault;
+    let user_position = &mut ctx.accounts.user_position;
+
+    if user_position.owner == Pubkey::default() {
+        user_position.owner = ctx.accounts.user.key();
+        user_position.vault = vault.key();
+        user_position.balances = [0u64; 8];
+        user_position.epoch = vault.position_epoch;
+        user_position.bump = ctx.bumps.user_position;
+    }
+
+    require!(
+        user_position.owner == ctx.accounts.user.key() && user_position.vault == vault.key(),
+        StableGuardError::Unauthorized
+    );
+
+    if user_position.epoch != vault.position_epoch {
+        user_position.balances = [0u64; 8];
+        user_position.epoch = vault.position_epoch;
+    }
 
     vault.total_deposited = vault
         .total_deposited
@@ -50,17 +88,24 @@ pub fn handle_deposit(ctx: Context<Deposit>, token_index: u8, amount: u64) -> Re
     vault.balances[token_index as usize] = vault.balances[token_index as usize]
         .checked_add(amount)
         .ok_or(StableGuardError::MathOverflow)?;
+    user_position.balances[token_index as usize] = user_position.balances[token_index as usize]
+        .checked_add(amount)
+        .ok_or(StableGuardError::MathOverflow)?;
 
     let cpi_ctx = CpiContext::new(
         ctx.accounts.token_program.to_account_info(),
         Transfer {
             from: ctx.accounts.user_token_account.to_account_info(),
-            to:   ctx.accounts.vault_token_account.to_account_info(),
+            to: ctx.accounts.vault_token_account.to_account_info(),
             authority: ctx.accounts.user.to_account_info(),
         },
     );
     token::transfer(cpi_ctx, amount)?;
 
-    msg!("Deposited {} tokens (token_index={}) into vault", amount, token_index);
+    msg!(
+        "Deposited {} tokens (token_index={}) into vault",
+        amount,
+        token_index
+    );
     Ok(())
 }

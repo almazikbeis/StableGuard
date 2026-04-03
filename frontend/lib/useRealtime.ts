@@ -40,6 +40,12 @@ export interface FeedMessage {
     deposited_at: number;
   };
   exec_sig?: string;
+  exec_status?: string;
+  exec_note?: string;
+  hot_path?: {
+    last_price: number;
+    tripped: boolean;
+  };
   ping?: boolean;
 }
 
@@ -83,6 +89,8 @@ export function useRealtime(opts: UseRealtimeOptions = {}) {
           max_deviation: data.risk?.deviation_pct ?? 0,
           decision: data.decision,
           exec_sig: data.last_exec_sig,
+          exec_status: data.last_exec_status,
+          exec_note: data.last_exec_note,
         };
         handleMsg(msg);
       } catch { /* ignore */ }

@@ -1,7 +1,9 @@
 "use client";
 
-import { Shield, RefreshCw, Settings, Wifi, WifiOff } from "lucide-react";
+import { Shield, RefreshCw, Settings } from "lucide-react";
 import Link from "next/link";
+import { CommandBar } from "@/components/CommandBar";
+import { WalletButton } from "@/components/WalletButton";
 
 interface Props {
   lastUpdate?: string;
@@ -31,6 +33,9 @@ export function Header({ lastUpdate, onRefresh, refreshing, connected, streamMod
         </Link>
 
         <div className="flex items-center gap-3">
+          <WalletButton />
+          <CommandBar />
+
           {lastUpdate && (
             <span className="text-xs text-gray-400 hidden sm:inline">
               Updated {lastUpdate}

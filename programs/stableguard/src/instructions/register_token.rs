@@ -58,12 +58,12 @@ pub fn handle_register_token(ctx: Context<RegisterToken>, token_index: u8) -> Re
     );
 
     let vault = &mut ctx.accounts.vault;
-    vault.mints[token_index as usize]        = ctx.accounts.mint.key();
+    vault.mints[token_index as usize] = ctx.accounts.mint.key();
     vault.vault_tokens[token_index as usize] = ctx.accounts.vault_token.key();
-    vault.num_tokens                         += 1;
+    vault.num_tokens += 1;
 
     let vault_key = vault.key();
-    let mint_key  = ctx.accounts.mint.key();
+    let mint_key = ctx.accounts.mint.key();
     let timestamp = Clock::get()?.unix_timestamp;
 
     emit!(TokenRegistered {

@@ -52,4 +52,10 @@ pub enum StableGuardError {
 
     #[msg("Maximum number of tokens (8) already reached")]
     MaxTokensReached,
+
+    #[msg("On-chain circuit breaker tripped — vault auto-paused")]
+    CircuitBreakerTripped,
+
+    #[msg("Caller is not the vault authority or delegated agent")]
+    UnauthorizedAgent,
 }

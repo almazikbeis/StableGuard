@@ -7,6 +7,12 @@ import { toast } from "@/lib/toast";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v1";
 
+function authHeaders(): HeadersInit {
+  if (typeof window === "undefined") return {};
+  const token = window.localStorage.getItem("sg_jwt");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 const TOKENS = [
   { label: "USDC", index: 0, decimals: 6 },
   { label: "USDT", index: 1, decimals: 6 },
@@ -53,7 +59,7 @@ export function DAOPayments() {
     try {
       const res = await fetch(`${BASE}/send`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({
           token_index: selectedToken.index,
           amount: rawAmount,

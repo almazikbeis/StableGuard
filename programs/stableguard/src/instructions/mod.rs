@@ -1,3 +1,4 @@
+pub mod delegate_agent;
 pub mod deposit;
 pub mod emergency_withdraw;
 pub mod initialize;
@@ -7,9 +8,11 @@ pub mod register_token;
 pub mod send_payment;
 pub mod set_strategy;
 pub mod toggle_pause;
+pub mod update_price;
 pub mod update_threshold;
 pub mod withdraw;
 
+pub use delegate_agent::*;
 pub use deposit::*;
 pub use emergency_withdraw::*;
 pub use initialize::*;
@@ -19,5 +22,6 @@ pub use register_token::*;
 pub use send_payment::*;
 pub use set_strategy::*;
 pub use toggle_pause::*;
+pub use update_price::*;
 pub use update_threshold::*;
 pub use withdraw::*;

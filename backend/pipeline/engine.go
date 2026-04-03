@@ -28,17 +28,19 @@ type Engine struct {
 	agents   *ai.MultiAgentSystem
 	executor *solanaexec.Executor
 	cfg      *config.Config
-	store    *store.DB          // optional
-	alerter  *alerts.Client     // optional
-	hub      *hub.Hub           // optional — SSE broadcast
-	yieldAgg *yield.Aggregator  // optional — yield APY data
+	store    *store.DB         // optional
+	alerter  *alerts.Client    // optional
+	hub      *hub.Hub          // optional — SSE broadcast
+	yieldAgg *yield.Aggregator // optional — yield APY data
 
-	mu                   sync.RWMutex
-	lastDecision         *ai.FinalDecision
-	lastScore            risk.ScoreV2
-	lastExecSig          string
-	lastSnap             *pyth.PriceSnapshot
-	circuitTripped       bool  // vault has been auto-paused
+	mu                    sync.RWMutex
+	lastDecision          *ai.FinalDecision
+	lastScore             risk.ScoreV2
+	lastExecSig           string
+	lastExecStatus        string
+	lastExecNote          string
+	lastSnap              *pyth.PriceSnapshot
+	circuitTripped        bool  // vault has been auto-paused
 	activeYieldPositionID int64 // 0 = no active position
 }
 
@@ -59,10 +61,22 @@ func New(
 	}
 }
 
-func (e *Engine) WithStore(s *store.DB) *Engine        { e.store = s; return e }
-func (e *Engine) WithAlerter(a *alerts.Client) *Engine { e.alerter = a; return e }
-func (e *Engine) WithHub(h *hub.Hub) *Engine           { e.hub = h; return e }
+func (e *Engine) WithStore(s *store.DB) *Engine           { e.store = s; return e }
+func (e *Engine) WithAlerter(a *alerts.Client) *Engine    { e.alerter = a; return e }
+func (e *Engine) WithHub(h *hub.Hub) *Engine              { e.hub = h; return e }
 func (e *Engine) WithYield(agg *yield.Aggregator) *Engine { e.yieldAgg = agg; return e }
+
+// LastState returns the most recent risk score, price snapshot, and AI decision.
+func (e *Engine) LastState() (risk.ScoreV2, *pyth.PriceSnapshot, *ai.FinalDecision) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastScore, e.lastSnap, e.lastDecision
+}
+
+// Agents returns the multi-agent system (may be nil if not running).
+func (e *Engine) Agents() *ai.MultiAgentSystem {
+	return e.agents
+}
 
 // Run starts the pipeline loop. Blocks until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context) {
@@ -87,6 +101,21 @@ func (e *Engine) Run(ctx context.Context) {
 		case snap, ok := <-prices:
 			if !ok {
 				return
+			}
+
+			// ── Step 0: Hot path — push price on-chain immediately ────────
+			if e.cfg.HotPathEnabled {
+				priceU64 := minPriceU64(snap)
+				go func(p uint64) {
+					ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					sig, err := e.executor.SendUpdatePriceAndCheck(ctx2, p)
+					if err != nil {
+						log.Printf("[hot-path] tick failed: %v", err)
+					} else {
+						log.Printf("[hot-path] tick price=%d sig=%s", p, sig)
+					}
+				}(priceU64)
 			}
 
 			// ── Step 1: push to window ────────────────────────────────────
@@ -273,6 +302,12 @@ func (e *Engine) checkRiskAlerts(score risk.ScoreV2, maxDev float64) {
 
 // ── SSE Broadcast ──────────────────────────────────────────────────────────
 
+// HotPathMsg carries the last on-chain price and circuit breaker state.
+type HotPathMsg struct {
+	LastPrice uint64 `json:"last_price"`
+	Tripped   bool   `json:"tripped"`
+}
+
 // YieldPositionMsg is the yield position embedded in SSE broadcasts.
 type YieldPositionMsg struct {
 	Protocol    string  `json:"protocol"`
@@ -291,7 +326,10 @@ type FeedMessage struct {
 	MaxDeviation float64            `json:"max_deviation"`
 	Decision     *ai.FinalDecision  `json:"decision,omitempty"`
 	ExecSig      string             `json:"exec_sig,omitempty"`
+	ExecStatus   string             `json:"exec_status,omitempty"`
+	ExecNote     string             `json:"exec_note,omitempty"`
 	YieldPos     *YieldPositionMsg  `json:"yield_position,omitempty"`
+	HotPath      *HotPathMsg        `json:"hot_path,omitempty"`
 }
 
 func (e *Engine) broadcastUpdate(snap *pyth.PriceSnapshot, score risk.ScoreV2) {
@@ -303,6 +341,8 @@ func (e *Engine) broadcastUpdate(snap *pyth.PriceSnapshot, score risk.ScoreV2) {
 	e.mu.RLock()
 	dec := e.lastDecision
 	sig := e.lastExecSig
+	status := e.lastExecStatus
+	note := e.lastExecNote
 	e.mu.RUnlock()
 
 	msg := FeedMessage{
@@ -312,6 +352,16 @@ func (e *Engine) broadcastUpdate(snap *pyth.PriceSnapshot, score risk.ScoreV2) {
 		MaxDeviation: snap.MaxDeviation(),
 		Decision:     dec,
 		ExecSig:      sig,
+		ExecStatus:   status,
+		ExecNote:     note,
+	}
+
+	// Attach hot path data if enabled
+	if e.cfg.HotPathEnabled {
+		msg.HotPath = &HotPathMsg{
+			LastPrice: minPriceU64(snap),
+			Tripped:   e.circuitTripped,
+		}
 	}
 
 	// Attach active yield position with live earned calculation
@@ -356,20 +406,12 @@ func (e *Engine) executeDecision(ctx context.Context, d *ai.FinalDecision, score
 		return
 	}
 
-	log.Printf("[pipeline] executing rebalance: %d→%d amount=%d", d.FromIndex, d.ToIndex, amount)
-	sig, err := e.executor.ExecuteRebalance(ctx, uint8(d.FromIndex), uint8(d.ToIndex), amount)
-	if err != nil {
-		log.Printf("[pipeline] execute_rebalance failed: %v", err)
-		return
-	}
-	log.Printf("[pipeline] rebalance tx: %s", sig)
-
-	if e.store != nil {
-		_ = e.store.SaveRebalance(d.FromIndex, d.ToIndex, amount, sig, score.RiskLevel)
-	}
-
+	note := "Signal only: market execution is unavailable under the current custody model because vault token accounts are program-owned. Add a dedicated swap/CPI path before enabling real execution."
+	log.Printf("[pipeline] signal only: %d→%d amount=%d | %s", d.FromIndex, d.ToIndex, amount, note)
 	e.mu.Lock()
-	e.lastExecSig = sig
+	e.lastExecSig = ""
+	e.lastExecStatus = "signal_only"
+	e.lastExecNote = note
 	e.mu.Unlock()
 
 	var actionCode uint8
@@ -428,6 +470,12 @@ func (e *Engine) LastExecSig() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.lastExecSig
+}
+
+func (e *Engine) LastExecMeta() (string, string) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastExecStatus, e.lastExecNote
 }
 
 func (e *Engine) LastSnap() *pyth.PriceSnapshot {
@@ -533,6 +581,21 @@ func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *
 			fmt.Sprintf("💰 Yield position opened\nProtocol: *%s* | Token: %s\nAmount: *$%.0f* @ *%.2f%%* APY\nRisk: %.0f (safe to enter)",
 				best.DisplayName, best.Token, amount, best.SupplyAPY, score.RiskLevel))
 	}
+}
+
+// minPriceU64 returns the minimum price across all tokens as a uint64
+// with 6 decimal places (e.g. 1.000000 = 1_000_000).
+func minPriceU64(snap *pyth.PriceSnapshot) uint64 {
+	var minPrice float64 = -1
+	for _, pd := range snap.All {
+		if minPrice < 0 || pd.Price < minPrice {
+			minPrice = pd.Price
+		}
+	}
+	if minPrice < 0 {
+		return 0
+	}
+	return uint64(minPrice * 1_000_000)
 }
 
 func formatDuration(d time.Duration) string {

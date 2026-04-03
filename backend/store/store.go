@@ -105,8 +105,111 @@ func (s *DB) migrate() error {
 		is_active    INTEGER NOT NULL DEFAULT 1
 	);
 	CREATE INDEX IF NOT EXISTS idx_yp_active ON yield_positions(is_active);
+
+	CREATE TABLE IF NOT EXISTS goals (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		name         TEXT    NOT NULL,
+		goal_type    TEXT    NOT NULL DEFAULT 'monthly_yield',
+		target       REAL    NOT NULL,
+		progress     REAL    NOT NULL DEFAULT 0,
+		currency     TEXT    NOT NULL DEFAULT 'USD',
+		deadline     INTEGER,
+		created_at   INTEGER NOT NULL,
+		completed_at INTEGER,
+		is_active    INTEGER NOT NULL DEFAULT 1
+	);
+	CREATE INDEX IF NOT EXISTS idx_goals_active ON goals(is_active);
+
+	CREATE TABLE IF NOT EXISTS chat_history (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts         INTEGER NOT NULL,
+		role       TEXT    NOT NULL,
+		content    TEXT    NOT NULL,
+		session_id TEXT    NOT NULL DEFAULT 'default'
+	);
+	CREATE INDEX IF NOT EXISTS idx_ch_session ON chat_history(session_id, ts);
+
+	CREATE TABLE IF NOT EXISTS users (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		email         TEXT    NOT NULL UNIQUE,
+		password_hash TEXT    NOT NULL,
+		org_name      TEXT    NOT NULL DEFAULT '',
+		created_at    INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+	CREATE TABLE IF NOT EXISTS otp_codes (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		email      TEXT    NOT NULL,
+		code       TEXT    NOT NULL,
+		expires_at INTEGER NOT NULL,
+		used       INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_otp_email ON otp_codes(email);
 	`)
 	return err
+}
+
+// ── Users ──────────────────────────────────────────────────────────────────
+
+// User is one row in the users table.
+type User struct {
+	ID           int64
+	Email        string
+	PasswordHash string
+	OrgName      string
+	CreatedAt    time.Time
+}
+
+// CreateUser inserts a new user and returns their ID.
+func (s *DB) CreateUser(email, passwordHash, orgName string) (int64, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO users (email, password_hash, org_name, created_at) VALUES (?, ?, ?, ?)`,
+		email, passwordHash, orgName, time.Now().Unix(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// FindUserByEmail looks up a user by email. Returns sql.ErrNoRows if not found.
+func (s *DB) FindUserByEmail(email string) (*User, error) {
+	row := s.db.QueryRow(
+		`SELECT id, email, password_hash, org_name, created_at FROM users WHERE email = ? LIMIT 1`,
+		email,
+	)
+	var u User
+	var ts int64
+	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.OrgName, &ts); err != nil {
+		return nil, err
+	}
+	u.CreatedAt = time.Unix(ts, 0)
+	return &u, nil
+}
+
+// SaveOTP stores a 6-digit code for email with a 15-minute expiry.
+func (s *DB) SaveOTP(email, code string) error {
+	exp := time.Now().Add(15 * time.Minute).Unix()
+	_, err := s.db.Exec(
+		`INSERT INTO otp_codes (email, code, expires_at, used) VALUES (?, ?, ?, 0)`,
+		email, code, exp,
+	)
+	return err
+}
+
+// VerifyOTP checks and consumes a code. Returns true if valid.
+func (s *DB) VerifyOTP(email, code string) bool {
+	row := s.db.QueryRow(
+		`SELECT id FROM otp_codes WHERE email=? AND code=? AND used=0 AND expires_at>? LIMIT 1`,
+		email, code, time.Now().Unix(),
+	)
+	var id int64
+	if err := row.Scan(&id); err != nil {
+		return false
+	}
+	s.db.Exec(`UPDATE otp_codes SET used=1 WHERE id=?`, id)
+	return true
 }
 
 // ── Yield positions ────────────────────────────────────────────────────────
@@ -415,6 +518,85 @@ type Stats struct {
 	TotalRiskEvents int
 	AvgRiskLevel    float64
 	LastDecisionTs  *time.Time
+}
+
+// ── Goals ──────────────────────────────────────────────────────────────────
+
+// Goal tracks a user financial objective.
+type Goal struct {
+	ID          int64      `json:"id"`
+	Name        string     `json:"name"`
+	GoalType    string     `json:"goal_type"`
+	Target      float64    `json:"target"`
+	Progress    float64    `json:"progress"`
+	Currency    string     `json:"currency"`
+	Deadline    *int64     `json:"deadline,omitempty"`
+	CreatedAt   int64      `json:"created_at"`
+	CompletedAt *int64     `json:"completed_at,omitempty"`
+	IsActive    bool       `json:"is_active"`
+}
+
+// CreateGoal inserts a new goal and returns its ID.
+func (s *DB) CreateGoal(name, goalType string, target float64, deadline *int64) (int64, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO goals(name,goal_type,target,currency,created_at,deadline)
+		 VALUES(?,?,?,'USD',?,?)`,
+		name, goalType, target, time.Now().Unix(), deadline,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// UpdateGoalProgress updates the progress field.
+func (s *DB) UpdateGoalProgress(id int64, progress float64) error {
+	_, err := s.db.Exec(`UPDATE goals SET progress=? WHERE id=?`, progress, id)
+	return err
+}
+
+// CompleteGoal marks a goal as done.
+func (s *DB) CompleteGoal(id int64) error {
+	_, err := s.db.Exec(`UPDATE goals SET completed_at=?,is_active=0 WHERE id=?`, time.Now().Unix(), id)
+	return err
+}
+
+// DeleteGoal soft-deletes a goal.
+func (s *DB) DeleteGoal(id int64) error {
+	_, err := s.db.Exec(`UPDATE goals SET is_active=0 WHERE id=?`, id)
+	return err
+}
+
+// ActiveGoals returns all non-completed goals.
+func (s *DB) ActiveGoals() ([]Goal, error) {
+	rows, err := s.db.Query(
+		`SELECT id,name,goal_type,target,progress,currency,deadline,created_at,completed_at,is_active
+		 FROM goals WHERE is_active=1 ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Goal
+	for rows.Next() {
+		var g Goal
+		var active int
+		if err := rows.Scan(&g.ID, &g.Name, &g.GoalType, &g.Target, &g.Progress,
+			&g.Currency, &g.Deadline, &g.CreatedAt, &g.CompletedAt, &active); err != nil {
+			continue
+		}
+		g.IsActive = active == 1
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// TotalYieldEarned returns the sum of all earned yield across closed positions.
+func (s *DB) TotalYieldEarned() float64 {
+	var total float64
+	s.db.QueryRow(`SELECT COALESCE(SUM(earned),0) FROM yield_positions`).Scan(&total)
+	return total
 }
 
 // GetStats returns aggregate counts.

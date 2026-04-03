@@ -6,10 +6,16 @@ import { Shield, ArrowLeft, Send, CheckCircle, XCircle, ExternalLink, Bell, Zap,
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v1";
 
+function authHeaders(): HeadersInit {
+  if (typeof window === "undefined") return {};
+  const token = window.localStorage.getItem("sg_jwt");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function post(path: string, body: unknown) {
   const r = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   return r.json();

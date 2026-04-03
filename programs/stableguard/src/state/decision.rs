@@ -29,5 +29,5 @@ impl DecisionLog {
         + 4 + Self::MAX_RATIONALE_LEN     // rationale (string prefix + bytes)
         + 1                               // confidence_score
         + 8                               // timestamp
-        + 1;                              // bump
+        + 1; // bump
 }

@@ -30,6 +30,18 @@ describe("stableguard", () => {
   let userToken0: anchor.web3.PublicKey;
   let userToken1: anchor.web3.PublicKey;
   let userToken2: anchor.web3.PublicKey;
+  let authorityPosition: anchor.web3.PublicKey;
+
+  const attacker = anchor.web3.Keypair.generate();
+  let attackerToken0: anchor.web3.PublicKey;
+  let attackerPosition: anchor.web3.PublicKey;
+
+  function deriveUserPosition(user: anchor.web3.PublicKey) {
+    return anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("user_position"), vaultPda.toBuffer(), user.toBuffer()],
+      program.programId
+    )[0];
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // Setup
@@ -65,11 +77,18 @@ describe("stableguard", () => {
     userToken0 = await createAccount(provider.connection, authority.payer, mockUSDC,  authority.publicKey);
     userToken1 = await createAccount(provider.connection, authority.payer, mockUSDT,  authority.publicKey);
     userToken2 = await createAccount(provider.connection, authority.payer, mockUSDCe, authority.publicKey);
+    attackerToken0 = await createAccount(provider.connection, authority.payer, mockUSDC, attacker.publicKey);
+
+    const sig = await provider.connection.requestAirdrop(attacker.publicKey, 1 * anchor.web3.LAMPORTS_PER_SOL);
+    await provider.connection.confirmTransaction(sig);
 
     // Mint 10M tokens to each user account
     await mintTo(provider.connection, authority.payer, mockUSDC,  userToken0, authority.publicKey, 10_000_000 * 1e6);
     await mintTo(provider.connection, authority.payer, mockUSDT,  userToken1, authority.publicKey, 10_000_000 * 1e6);
     await mintTo(provider.connection, authority.payer, mockUSDCe, userToken2, authority.publicKey, 10_000_000 * 1e6);
+
+    authorityPosition = deriveUserPosition(authority.publicKey);
+    attackerPosition = deriveUserPosition(attacker.publicKey);
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -217,7 +236,9 @@ describe("stableguard", () => {
         vault: vaultPda,
         userTokenAccount: userToken0,
         vaultTokenAccount: vaultToken0,
+        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -236,7 +257,9 @@ describe("stableguard", () => {
         vault: vaultPda,
         userTokenAccount: userToken1,
         vaultTokenAccount: vaultToken1,
+        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -254,7 +277,9 @@ describe("stableguard", () => {
         vault: vaultPda,
         userTokenAccount: userToken2,
         vaultTokenAccount: vaultToken2,
+        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -273,7 +298,7 @@ describe("stableguard", () => {
 
     await program.methods
       .executeRebalance(0, 1, new anchor.BN(50 * 1e6))
-      .accounts({ authority: authority.publicKey, vault: vaultPda })
+      .accounts({ signer: authority.publicKey, vault: vaultPda })
       .rpc();
 
     const after = await program.account.vaultState.fetch(vaultPda);
@@ -289,7 +314,7 @@ describe("stableguard", () => {
 
     await program.methods
       .executeRebalance(1, 2, new anchor.BN(30 * 1e6))
-      .accounts({ authority: authority.publicKey, vault: vaultPda })
+      .accounts({ signer: authority.publicKey, vault: vaultPda })
       .rpc();
 
     const after = await program.account.vaultState.fetch(vaultPda);
@@ -302,7 +327,7 @@ describe("stableguard", () => {
     try {
       await program.methods
         .executeRebalance(0, 0, new anchor.BN(10 * 1e6))
-        .accounts({ authority: authority.publicKey, vault: vaultPda })
+        .accounts({ signer: authority.publicKey, vault: vaultPda })
         .rpc();
       assert.fail("Should have thrown InvalidDirection");
     } catch (err: any) {
@@ -333,7 +358,9 @@ describe("stableguard", () => {
           vault: vaultPda,
           userTokenAccount: userToken0,
           vaultTokenAccount: vaultToken0,
+          userPosition: authorityPosition,
           tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc();
       assert.fail("Should have thrown VaultPaused");
@@ -350,9 +377,11 @@ describe("stableguard", () => {
       .withdraw(0, withdrawAmount)
       .accounts({
         user: authority.publicKey,
+        owner: authority.publicKey,
         vault: vaultPda,
         userTokenAccount: userToken0,
         vaultTokenAccount: vaultToken0,
+        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
       .rpc();
@@ -362,6 +391,32 @@ describe("stableguard", () => {
       (BigInt(after.amount) - BigInt(before.amount)).toString(),
       (10 * 1e6).toString()
     );
+  });
+
+  it("withdraw: rejects unauthorized signer even if they pass a valid vault token account", async () => {
+    try {
+      await program.methods
+        .withdraw(0, new anchor.BN(1 * 1e6))
+        .accounts({
+          user: attacker.publicKey,
+          owner: attacker.publicKey,
+          vault: vaultPda,
+          userTokenAccount: attackerToken0,
+          vaultTokenAccount: vaultToken0,
+          userPosition: attackerPosition,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([attacker])
+        .rpc();
+      assert.fail("Should have thrown because attacker has no position");
+    } catch (err: any) {
+      assert.ok(
+        err.message.includes("AccountNotInitialized") ||
+        err.message.includes("InsufficientBalance") ||
+        err.message.includes("Unauthorized"),
+        `unexpected error: ${err.message}`
+      );
+    }
   });
 
   it("toggle_pause: unpauses vault", async () => {
@@ -610,7 +665,9 @@ describe("stableguard", () => {
         vault: vaultPda,
         userTokenAccount: userToken0,
         vaultTokenAccount: vaultToken0,
+        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
     await program.methods
@@ -620,7 +677,9 @@ describe("stableguard", () => {
         vault: vaultPda,
         userTokenAccount: userToken1,
         vaultTokenAccount: vaultToken1,
+        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
     await program.methods
@@ -630,7 +689,9 @@ describe("stableguard", () => {
         vault: vaultPda,
         userTokenAccount: userToken2,
         vaultTokenAccount: vaultToken2,
+        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 

@@ -50,6 +50,14 @@ type Config struct {
 	// CircuitBreakerEmergencyPct: deviation % that triggers critical alert (default 3.0)
 	CircuitBreakerEmergencyPct float64
 
+	// ── Hot Path / Agent ──────────────────────────────────────────────────
+	// HotPathEnabled: if true, pipeline calls update_price_and_check on-chain every tick
+	HotPathEnabled bool
+	// AgentPubkey: base58 pubkey of the delegated agent wallet (may equal WalletKeyPath pubkey)
+	AgentPubkey string
+	// VaultLUTAddress: pre-created address lookup table address for v0 transactions
+	VaultLUTAddress string
+
 	// ── Yield Optimizer ──────────────────────────────────────────────────
 	// YieldEnabled: enables automatic yield deposits on OPTIMIZE signal
 	YieldEnabled bool
@@ -94,6 +102,10 @@ func Load() *Config {
 		CircuitBreakerEnabled:      getBool("CIRCUIT_BREAKER_ENABLED", true),
 		CircuitBreakerPausePct:     getFloat("CIRCUIT_BREAKER_PAUSE_PCT", 1.5),
 		CircuitBreakerEmergencyPct: getFloat("CIRCUIT_BREAKER_EMERGENCY_PCT", 3.0),
+
+		HotPathEnabled:  getBool("HOT_PATH_ENABLED", false),
+		AgentPubkey:     os.Getenv("AGENT_PUBKEY"),
+		VaultLUTAddress: os.Getenv("VAULT_LUT_ADDRESS"),
 
 		YieldEnabled:       getBool("YIELD_ENABLED", false),
 		YieldMinAPY:        getFloat("YIELD_MIN_APY", 4.0),

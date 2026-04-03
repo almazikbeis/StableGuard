@@ -15,27 +15,31 @@ pub struct RebalanceExecuted {
 #[derive(Accounts)]
 pub struct ExecuteRebalance<'info> {
     #[account(mut)]
-    pub authority: Signer<'info>,
+    pub signer: Signer<'info>,
 
     #[account(
         mut,
-        seeds = [b"vault", authority.key().as_ref()],
+        seeds = [b"vault", vault.authority.as_ref()],
         bump = vault.bump,
-        has_one = authority @ StableGuardError::UnauthorizedRebalance
     )]
     pub vault: Account<'info, VaultState>,
 }
 
 /// Rebalance shifts the virtual allocation between two registered token slots.
 /// This is an internal accounting update — no cross-mint SPL transfer occurs.
-/// In production, the off-chain AI agent triggers a real swap (e.g. via Jupiter)
-/// then calls this instruction to record the updated allocation.
+/// The signer can be either the vault authority or the delegated AI agent.
 pub fn handle_rebalance(
     ctx: Context<ExecuteRebalance>,
     from_index: u8,
     to_index: u8,
     amount: u64,
 ) -> Result<()> {
+    require!(
+        ctx.accounts
+            .vault
+            .is_authorized_agent(&ctx.accounts.signer.key()),
+        StableGuardError::UnauthorizedAgent
+    );
     require!(!ctx.accounts.vault.is_paused, StableGuardError::VaultPaused);
     require!(amount > 0, StableGuardError::InvalidRebalanceAmount);
     require!(from_index != to_index, StableGuardError::InvalidDirection);
@@ -53,7 +57,7 @@ pub fn handle_rebalance(
     );
 
     let vault_key = ctx.accounts.vault.key();
-    let vault     = &mut ctx.accounts.vault;
+    let vault = &mut ctx.accounts.vault;
 
     vault.balances[from_index as usize] = vault.balances[from_index as usize]
         .checked_sub(amount)

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Syne, DM_Mono } from "next/font/google";
 import "./globals.css";
 import { ToastContainer } from "@/components/ToastContainer";
+import { WalletProvider } from "@/components/WalletProvider";
 
 const syne = Syne({
   subsets: ["latin"],
@@ -29,7 +30,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={`h-full ${syne.variable} ${dmMono.variable}`}>
       <body className="min-h-full">
-        {children}
+        <WalletProvider>
+          {children}
+        </WalletProvider>
         <ToastContainer />
       </body>
     </html>
