@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,12 @@ var secret = func() []byte {
 	}
 	return []byte("stableguard-dev-secret-change-in-prod")
 }()
+
+const (
+	walletLoginPrefix     = "StableGuard login: "
+	walletLoginMaxAge     = 5 * time.Minute
+	walletLoginFutureSkew = 1 * time.Minute
+)
 
 // Claims is the JWT payload.
 type Claims struct {
@@ -163,8 +170,11 @@ func ValidateWalletToken(token string) (*WalletClaims, error) {
 // address is the base58-encoded public key, signature is base64-encoded.
 // The message must start with "StableGuard login: " to prevent replay attacks.
 func VerifyWalletSignature(address, message, signature string) error {
-	if !strings.HasPrefix(message, "StableGuard login: ") {
+	if !strings.HasPrefix(message, walletLoginPrefix) {
 		return errors.New("invalid message prefix")
+	}
+	if err := verifyWalletMessageFreshness(message, time.Now()); err != nil {
+		return err
 	}
 
 	pubkeyBytes, err := base58.Decode(address)
@@ -189,5 +199,26 @@ func VerifyWalletSignature(address, message, signature string) error {
 		return errors.New("signature verification failed")
 	}
 
+	return nil
+}
+
+func verifyWalletMessageFreshness(message string, now time.Time) error {
+	rawTS := strings.TrimSpace(strings.TrimPrefix(message, walletLoginPrefix))
+	if rawTS == "" {
+		return errors.New("missing login timestamp")
+	}
+
+	ts, err := strconv.ParseInt(rawTS, 10, 64)
+	if err != nil {
+		return errors.New("invalid login timestamp")
+	}
+
+	msgTime := time.Unix(ts, 0)
+	if msgTime.After(now.Add(walletLoginFutureSkew)) {
+		return errors.New("login timestamp is too far in the future")
+	}
+	if now.Sub(msgTime) > walletLoginMaxAge {
+		return errors.New("login message expired")
+	}
 	return nil
 }

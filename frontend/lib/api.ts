@@ -53,6 +53,15 @@ export interface PipelineStatus {
     action: string;
     summary: string;
   };
+  policy: {
+    action_class: string;
+    verdict: "allowed" | "blocked" | "requires_approval";
+    reason: string;
+    control_mode: string;
+    auto_execute: boolean;
+    yield_enabled: boolean;
+    execution_intent: string;
+  };
   decision: {
     action: string;
     from_index: number;
@@ -196,10 +205,15 @@ export interface SettingsResponse {
   strategy_name: string;
   auto_execute: boolean;
   yield_enabled: boolean;
+  yield_live_mode: "disabled" | "strategy_only" | "live";
+  yield_live_note: string;
   yield_entry_risk: number;
   yield_exit_risk: number;
   circuit_breaker_pause_pct: number;
   alert_risk_threshold: number;
+  execution_mode: "record_only";
+  custody_model: "program_owned_vault_accounts";
+  execution_note: string;
   hub_subscribers: number;
 }
 

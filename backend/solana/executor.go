@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -29,23 +30,23 @@ type Executor struct {
 
 // VaultState mirrors the on-chain VaultState account layout.
 type VaultState struct {
-	Authority                [32]byte
-	Mints                    [MaxTokens][32]byte
-	VaultTokens              [MaxTokens][32]byte
-	TotalDeposited           uint64
-	Balances                 [MaxTokens]uint64
-	RebalanceThreshold       uint64
-	MaxDeposit               uint64
-	DecisionCount            uint64
-	TotalRebalances          uint64
-	NumTokens                uint8
-	IsPaused                 bool
-	StrategyMode             uint8
-	Bump                     uint8
-	DelegatedAgent           [32]byte
-	CircuitBreakerThreshold  uint64
-	LastPrice                uint64
-	PositionEpoch            uint64
+	Authority               [32]byte
+	Mints                   [MaxTokens][32]byte
+	VaultTokens             [MaxTokens][32]byte
+	TotalDeposited          uint64
+	Balances                [MaxTokens]uint64
+	RebalanceThreshold      uint64
+	MaxDeposit              uint64
+	DecisionCount           uint64
+	TotalRebalances         uint64
+	NumTokens               uint8
+	IsPaused                bool
+	StrategyMode            uint8
+	Bump                    uint8
+	DelegatedAgent          [32]byte
+	CircuitBreakerThreshold uint64
+	LastPrice               uint64
+	PositionEpoch           uint64
 }
 
 // New creates a new Solana executor.
@@ -415,6 +416,14 @@ func (e *Executor) DeriveDecisionPDA(vaultPDA solana.PublicKey, decisionCount ui
 	)
 }
 
+// DeriveUserPositionPDA derives the PDA for a user's position in the vault.
+func (e *Executor) DeriveUserPositionPDA(vaultPDA, user solana.PublicKey) (solana.PublicKey, uint8, error) {
+	return solana.FindProgramAddress(
+		[][]byte{[]byte("user_position"), vaultPDA.Bytes(), user.Bytes()},
+		e.programID,
+	)
+}
+
 // SendRecordDecision submits a record_decision instruction on-chain.
 // It fetches the current decision_count from vault state to derive the correct PDA.
 func (e *Executor) SendRecordDecision(ctx context.Context, action uint8, rationale string, confidence uint8) (string, error) {
@@ -527,6 +536,102 @@ func (e *Executor) SendUpdatePriceAndCheck(ctx context.Context, price uint64) (s
 		{PublicKey: signer, IsSigner: true, IsWritable: true},
 		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
 	})
+}
+
+// SendDeposit submits a deposit instruction on-chain from the executor wallet's token account.
+// Use this to return funds from a trusted external strategy account back into the vault.
+func (e *Executor) SendDeposit(ctx context.Context, amount uint64, userTokenAccount string, tokenIndex uint8) (string, error) {
+	user := e.wallet.PublicKey()
+	vaultPDA, _, err := e.DeriveVaultPDA(e.authorityPK)
+	if err != nil {
+		return "", fmt.Errorf("derive vault pda: %w", err)
+	}
+
+	vs, err := e.FetchVaultState(ctx, vaultPDA)
+	if err != nil {
+		return "", fmt.Errorf("fetch vault state: %w", err)
+	}
+	if int(tokenIndex) >= MaxTokens {
+		return "", fmt.Errorf("token_index %d out of range", tokenIndex)
+	}
+
+	userTokenPK, err := solana.PublicKeyFromBase58(userTokenAccount)
+	if err != nil {
+		return "", fmt.Errorf("invalid user token account: %w", err)
+	}
+	vaultTokenAccount := solana.PublicKeyFromBytes(vs.VaultTokens[tokenIndex][:])
+	userPositionPDA, _, err := e.DeriveUserPositionPDA(vaultPDA, user)
+	if err != nil {
+		return "", fmt.Errorf("derive user position pda: %w", err)
+	}
+
+	disc := anchorDiscriminator("deposit")
+	data := make([]byte, 8+1+8)
+	copy(data[0:8], disc)
+	data[8] = tokenIndex
+	binary.LittleEndian.PutUint64(data[9:], amount)
+
+	tokenProgram := solana.MustPublicKeyFromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
+		{PublicKey: user, IsSigner: true, IsWritable: true},
+		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
+		{PublicKey: userTokenPK, IsSigner: false, IsWritable: true},
+		{PublicKey: vaultTokenAccount, IsSigner: false, IsWritable: true},
+		{PublicKey: userPositionPDA, IsSigner: false, IsWritable: true},
+		{PublicKey: tokenProgram, IsSigner: false, IsWritable: false},
+		{PublicKey: solana.SystemProgramID, IsSigner: false, IsWritable: false},
+	})
+}
+
+// SendExternalTransaction signs an externally-built base64 transaction with the executor wallet and submits it.
+func (e *Executor) SendExternalTransaction(ctx context.Context, txBase64 string) (string, error) {
+	tx, err := solana.TransactionFromBase64(txBase64)
+	if err != nil {
+		return "", fmt.Errorf("decode external tx: %w", err)
+	}
+
+	signer := e.wallet.PublicKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(signer) {
+			return &e.wallet
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("sign external tx: %w", err)
+	}
+
+	sig, err := e.rpcClient.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{
+		SkipPreflight: false,
+	})
+	if err != nil {
+		return "", fmt.Errorf("send external tx: %w", err)
+	}
+	return sig.String(), nil
+}
+
+// TokenAccountBalance returns the raw amount in base units for the given SPL token account.
+func (e *Executor) TokenAccountBalance(ctx context.Context, account string) (uint64, error) {
+	pk, err := solana.PublicKeyFromBase58(account)
+	if err != nil {
+		return 0, fmt.Errorf("invalid token account: %w", err)
+	}
+	out, err := e.rpcClient.GetTokenAccountBalance(ctx, pk, rpc.CommitmentConfirmed)
+	if err != nil {
+		return 0, fmt.Errorf("get token account balance: %w", err)
+	}
+	if out == nil || out.Value == nil {
+		return 0, fmt.Errorf("empty token account balance response")
+	}
+	raw := out.Value.Amount
+	if raw == "" {
+		return 0, nil
+	}
+	amt, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse token account balance: %w", err)
+	}
+	return amt, nil
 }
 
 // SendTogglePause submits a toggle_pause instruction on-chain.

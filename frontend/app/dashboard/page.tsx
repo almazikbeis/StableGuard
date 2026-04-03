@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useRealtime, FeedMessage } from "@/lib/useRealtime";
 import { api, TokensResponse, VaultState, DecisionRow, HistoryStats, SettingsResponse } from "@/lib/api";
@@ -32,6 +32,9 @@ import {
   Settings,
   Bot,
   Lock,
+  Sparkles,
+  Radar,
+  Orbit,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -39,27 +42,27 @@ const STRATEGY_NAMES: Record<number, string> = { 0: "SAFE", 1: "BALANCED", 2: "Y
 const CONTROL_MODE_META: Record<string, { label: string; tone: string; blurb: string }> = {
   MANUAL: {
     label: "MANUAL",
-    tone: "text-gray-700",
+    tone: "text-slate-200",
     blurb: "AI monitors, explains, and alerts. Human stays fully in control.",
   },
   GUARDED: {
     label: "GUARDED",
-    tone: "text-green-700",
+    tone: "text-emerald-300",
     blurb: "AI only steps in for extreme-risk protection and depeg defense.",
   },
   BALANCED: {
     label: "BALANCED",
-    tone: "text-blue-700",
+    tone: "text-cyan-300",
     blurb: "AI runs moderate automation with protection-first policy limits.",
   },
   YIELD_MAX: {
     label: "YIELD MAX",
-    tone: "text-orange-700",
+    tone: "text-orange-300",
     blurb: "AI takes the most initiative while keeping circuit breakers active.",
   },
   UNKNOWN: {
     label: "UNKNOWN",
-    tone: "text-gray-500",
+    tone: "text-slate-400",
     blurb: "Control profile unavailable.",
   },
 };
@@ -116,21 +119,30 @@ export default function Dashboard() {
       api.priceHistory(selectedSymbol, 120),
       api.settings(),
     ]);
-    if (t.status === "fulfilled") { setTokens(t.value); setError(null); }
-    else setError(String((t as PromiseRejectedResult).reason));
-    if (v.status === "fulfilled") setVault(v.value);
-    if (d.status === "fulfilled") setDecisions(d.value.decisions ?? []);
-    if (s.status === "fulfilled") setStats(s.value);
-    if (ph.status === "fulfilled") setPriceHistory(ph.value.data ?? []);
-    if (st.status === "fulfilled") setSettings(st.value);
-    setLastUpdate(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    startTransition(() => {
+      if (t.status === "fulfilled") { setTokens(t.value); setError(null); }
+      else setError(String((t as PromiseRejectedResult).reason));
+      if (v.status === "fulfilled") setVault(v.value);
+      if (d.status === "fulfilled") setDecisions(d.value.decisions ?? []);
+      if (s.status === "fulfilled") setStats(s.value);
+      if (ph.status === "fulfilled") setPriceHistory(ph.value.data ?? []);
+      if (st.status === "fulfilled") setSettings(st.value);
+      setLastUpdate(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    });
     setRefreshing(false);
   }, [selectedSymbol]);
 
   useEffect(() => {
-    loadStatic();
-    const t = setInterval(loadStatic, 30_000);
-    return () => clearInterval(t);
+    const initial = setTimeout(() => {
+      void loadStatic();
+    }, 0);
+    const t = setInterval(() => {
+      void loadStatic();
+    }, 30_000);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(t);
+    };
   }, [loadStatic]);
 
   const risk = liveData?.risk ?? null;
@@ -150,15 +162,18 @@ export default function Dashboard() {
     : null;
 
   function riskBg(r: number) {
-    if (r < 30) return "bg-green-50 border-green-200";
-    if (r < 60) return "bg-yellow-50 border-yellow-200";
-    if (r < 80) return "bg-orange-50 border-orange-200";
-    return "bg-red-50 border-red-200";
+    if (r < 30) return "bg-emerald-400/6 border-emerald-300/18";
+    if (r < 60) return "bg-yellow-400/6 border-yellow-300/18";
+    if (r < 80) return "bg-orange-400/8 border-orange-300/18";
+    return "bg-red-400/8 border-red-300/18";
   }
 
   const currentDecision = liveData?.decision ?? null;
   const controlMode = settings?.control_mode ?? "UNKNOWN";
   const controlMeta = CONTROL_MODE_META[controlMode] ?? CONTROL_MODE_META.UNKNOWN;
+  const executionMode = settings?.execution_mode ?? "record_only";
+  const policyEval = liveData?.policy;
+  const yieldLiveMode = settings?.yield_live_mode ?? "disabled";
   const execStatus = liveData?.exec_status ?? "warming_up";
   const execStatusLabel =
     execStatus === "signal_only"
@@ -170,15 +185,36 @@ export default function Dashboard() {
       : "Standby";
   const execStatusTone =
     execStatus === "signal_only"
-      ? "text-amber-700"
+      ? "text-amber-300"
       : execStatus === "executed"
-      ? "text-green-700"
+      ? "text-emerald-300"
       : execStatus === "failed"
-      ? "text-red-700"
-      : "text-gray-600";
+      ? "text-red-300"
+      : "text-slate-300";
+  const policyVerdictLabel =
+    policyEval?.verdict === "allowed"
+      ? "Allowed"
+      : policyEval?.verdict === "blocked"
+      ? "Blocked"
+      : policyEval?.verdict === "requires_approval"
+      ? "Approval"
+      : "Pending";
+  const policyVerdictTone =
+    policyEval?.verdict === "allowed"
+      ? "text-emerald-300"
+      : policyEval?.verdict === "blocked"
+      ? "text-red-300"
+      : policyEval?.verdict === "requires_approval"
+      ? "text-amber-300"
+      : "text-slate-300";
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen relative overflow-x-hidden">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+        <div className="absolute -top-40 left-[10%] h-80 w-80 rounded-full bg-cyan-400/10 blur-[100px]" />
+        <div className="absolute top-32 right-[4%] h-[26rem] w-[26rem] rounded-full bg-orange-500/12 blur-[120px]" />
+        <div className="absolute inset-x-0 top-0 h-[32rem] opacity-40 animate-grid-drift bg-[linear-gradient(transparent_96%,rgba(255,255,255,0.06)_100%),linear-gradient(90deg,transparent_96%,rgba(255,255,255,0.06)_100%)] bg-[size:64px_64px]" />
+      </div>
       <Header
         lastUpdate={lastUpdate}
         onRefresh={loadStatic}
@@ -187,7 +223,48 @@ export default function Dashboard() {
         streamMode={mode}
       />
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+      <main className="relative max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+        <motion.section
+          initial={{ opacity: 0, y: 18 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35 }}
+          className="panel-surface neon-border rounded-[28px] px-5 py-5 sm:px-7 sm:py-6 overflow-hidden"
+        >
+          <div className="absolute inset-0 pointer-events-none" aria-hidden>
+            <div className="absolute inset-y-0 left-0 w-1/2 bg-[radial-gradient(circle_at_top_left,rgba(79,227,255,0.14),transparent_55%)]" />
+            <div className="absolute inset-y-0 right-0 w-1/2 bg-[radial-gradient(circle_at_top_right,rgba(255,122,26,0.18),transparent_52%)]" />
+            <div className="absolute top-1/2 left-[-12%] h-px w-[50%] bg-gradient-to-r from-transparent via-cyan-300/30 to-transparent animate-scanner" />
+          </div>
+          <div className="relative grid grid-cols-1 xl:grid-cols-[1.4fr_0.9fr] gap-6 items-start">
+            <div>
+              <div className="flex flex-wrap items-center gap-2 mb-4">
+                <span className="glass-pill rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-cyan-200">Autonomous Treasury</span>
+                <span className="glass-pill rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-orange-200">Stablecoin Defense Grid</span>
+              </div>
+              <h1 className="font-display text-3xl sm:text-4xl lg:text-5xl leading-[0.98] tracking-[-0.04em] text-white max-w-3xl">
+                AI modes, policy firewalls, and yield execution in one Solana control surface.
+              </h1>
+              <p className="mt-4 max-w-2xl text-sm sm:text-base text-slate-300 leading-relaxed">
+                StableGuard turns treasury automation into something visible and bounded: market signals in, AI proposals evaluated, policy verdicts enforced, and trusted execution paths exposed live.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 xl:grid-cols-1 gap-3">
+              {[
+                { icon: <Radar size={15} className="text-cyan-300" />, label: "Execution", value: execStatusLabel, tone: execStatusTone },
+                { icon: <Sparkles size={15} className="text-orange-300" />, label: "Policy", value: policyVerdictLabel, tone: policyVerdictTone },
+                { icon: <Orbit size={15} className="text-emerald-300" />, label: "Yield", value: yieldLiveMode === "live" ? "Live" : yieldLiveMode === "strategy_only" ? "Strategy" : "Disabled", tone: yieldLiveMode === "live" ? "text-emerald-300" : yieldLiveMode === "strategy_only" ? "text-amber-300" : "text-slate-300" },
+              ].map((item) => (
+                <div key={item.label} className="glass-pill rounded-[18px] px-4 py-3">
+                  <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                    {item.icon}
+                    {item.label}
+                  </div>
+                  <div className={`mt-2 text-lg font-semibold ${item.tone}`}>{item.value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </motion.section>
 
         {/* ── Pipeline Architecture Visualizer ── */}
         <motion.div
@@ -203,13 +280,13 @@ export default function Dashboard() {
           <motion.div
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3"
+            className="rounded-2xl px-4 py-3 bg-amber-400/10 border border-amber-300/20"
           >
-            <div className="flex items-center gap-2 text-sm font-semibold text-amber-800 mb-1">
+            <div className="flex items-center gap-2 text-sm font-semibold text-amber-200 mb-1">
               <AlertTriangle size={14} />
               Backend connection error
             </div>
-            <p className="text-xs text-amber-700">
+            <p className="text-xs text-amber-100/80">
               {error.includes("404") || error.includes("Cannot GET")
                 ? "Backend running with old code — restart: kill process → cd backend → go run main.go"
                 : "Backend unreachable. Start: cd backend && go run main.go"}
@@ -292,56 +369,92 @@ export default function Dashboard() {
           <motion.div variants={card} className="lg:col-span-3">
             <Card title="AI Control Layer" subtitle="Configurable autonomy instead of one fixed autopilot">
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                <div className="panel-surface-soft rounded-[22px] p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <Bot size={15} className={controlMeta.tone} />
                     <p className={`text-sm font-semibold ${controlMeta.tone}`}>{controlMeta.label}</p>
                   </div>
-                  <p className="text-sm text-gray-600 leading-relaxed">{controlMeta.blurb}</p>
+                  <p className="text-sm text-slate-300 leading-relaxed">{controlMeta.blurb}</p>
                   <div className="mt-3 grid grid-cols-2 gap-2">
-                    <div className="rounded-lg bg-gray-50 p-2 border border-gray-100">
-                      <div className="text-[10px] text-gray-500">Auto execute</div>
-                      <div className="text-sm font-semibold text-gray-800">{settings?.auto_execute ? "Enabled" : "Disabled"}</div>
+                    <div className="rounded-xl bg-white/5 p-2.5 border border-white/8">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Auto execute</div>
+                      <div className="text-sm font-semibold text-slate-100">{settings?.auto_execute ? "Enabled" : "Disabled"}</div>
                     </div>
-                    <div className="rounded-lg bg-gray-50 p-2 border border-gray-100">
-                      <div className="text-[10px] text-gray-500">Yield layer</div>
-                      <div className="text-sm font-semibold text-gray-800">{settings?.yield_enabled ? "Enabled" : "Disabled"}</div>
+                    <div className="rounded-xl bg-white/5 p-2.5 border border-white/8">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Yield layer</div>
+                      <div className="text-sm font-semibold text-slate-100">
+                        {yieldLiveMode === "live" ? "Live" : yieldLiveMode === "strategy_only" ? "Strategy only" : settings?.yield_enabled ? "Enabled" : "Disabled"}
+                      </div>
+                    </div>
+                    <div className="rounded-xl bg-white/5 p-2.5 border border-white/8">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Policy verdict</div>
+                      <div className={`text-sm font-semibold ${policyVerdictTone}`}>{policyVerdictLabel}</div>
+                    </div>
+                    <div className="rounded-xl bg-white/5 p-2.5 border border-white/8">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Action class</div>
+                      <div className="text-sm font-semibold text-slate-100">{policyEval?.action_class ?? "observe"}</div>
                     </div>
                   </div>
+                  <div className="mt-3 rounded-xl border border-amber-300/20 bg-amber-400/10 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                      Custody Boundary
+                    </div>
+                    <p className="mt-1 text-xs leading-relaxed text-amber-100/80">
+                      {executionMode === "record_only"
+                        ? "AI can score, propose, and record allocation shifts, but current custody keeps market swaps unavailable."
+                        : settings?.execution_note}
+                    </p>
+                  </div>
+                  {policyEval?.reason && (
+                    <div className="mt-3 rounded-xl border border-white/8 bg-white/5 px-3 py-2">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                        Policy Reason
+                      </div>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-200">{policyEval.reason}</p>
+                    </div>
+                  )}
+                  {settings?.yield_live_note && (
+                    <div className="mt-3 rounded-xl border border-cyan-300/20 bg-cyan-400/8 px-3 py-2">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-cyan-200">
+                        Yield Execution
+                      </div>
+                      <p className="mt-1 text-xs leading-relaxed text-cyan-100/85">{settings.yield_live_note}</p>
+                    </div>
+                  )}
                 </div>
 
-                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                <div className="panel-surface-soft rounded-[22px] p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <Lock size={15} className={execStatusTone} />
                     <p className={`text-sm font-semibold ${execStatusTone}`}>Execution Status</p>
                   </div>
                   <p className={`text-lg font-bold ${execStatusTone}`}>{execStatusLabel}</p>
-                  <p className="text-sm text-gray-600 leading-relaxed mt-2">
+                  <p className="text-sm text-slate-300 leading-relaxed mt-2">
                     {liveData?.exec_note ?? "Waiting for the next pipeline decision to report execution status."}
                   </p>
                 </div>
 
-                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                <div className="panel-surface-soft rounded-[22px] p-4">
                   <div className="flex items-center gap-2 mb-2">
-                    <Shield size={15} className="text-gray-600" />
-                    <p className="text-sm font-semibold text-gray-800">Policy Envelope</p>
+                    <Shield size={15} className="text-slate-300" />
+                    <p className="text-sm font-semibold text-slate-100">Policy Envelope</p>
                   </div>
-                  <div className="space-y-2 text-sm text-gray-600">
+                  <div className="space-y-2 text-sm text-slate-300">
                     <div className="flex items-center justify-between gap-3">
                       <span>Risk threshold</span>
-                      <span className="font-semibold text-gray-900">{settings?.alert_risk_threshold ?? "—"}</span>
+                      <span className="font-semibold text-slate-50">{settings?.alert_risk_threshold ?? "—"}</span>
                     </div>
                     <div className="flex items-center justify-between gap-3">
                       <span>Yield entry risk</span>
-                      <span className="font-semibold text-gray-900">{settings?.yield_entry_risk ?? "—"}</span>
+                      <span className="font-semibold text-slate-50">{settings?.yield_entry_risk ?? "—"}</span>
                     </div>
                     <div className="flex items-center justify-between gap-3">
                       <span>Circuit breaker</span>
-                      <span className="font-semibold text-gray-900">{settings?.circuit_breaker_pause_pct ?? "—"}%</span>
+                      <span className="font-semibold text-slate-50">{settings?.circuit_breaker_pause_pct ?? "—"}%</span>
                     </div>
                     <div className="flex items-center justify-between gap-3">
                       <span>On-chain strategy</span>
-                      <span className="font-semibold text-gray-900">{vault ? STRATEGY_NAMES[vault.strategy_mode] ?? "—" : "—"}</span>
+                      <span className="font-semibold text-slate-50">{vault ? STRATEGY_NAMES[vault.strategy_mode] ?? "—" : "—"}</span>
                     </div>
                   </div>
                 </div>
@@ -354,7 +467,7 @@ export default function Dashboard() {
               <div className="flex flex-col items-center gap-3">
                 <RiskGauge value={riskLevel} size={180} />
                 {risk?.summary && (
-                  <p className="text-xs text-gray-600 text-center leading-relaxed px-2">
+                  <p className="text-xs text-slate-300 text-center leading-relaxed px-2">
                     {risk.summary}
                   </p>
                 )}
@@ -367,10 +480,10 @@ export default function Dashboard() {
                     ].map((m) => (
                       <div
                         key={m.label}
-                        className="bg-white/60 rounded-lg p-2 text-center border border-white"
+                        className="rounded-xl p-2 text-center border border-white/10 bg-white/6"
                       >
-                        <div className="text-[10px] text-gray-500">{m.label}</div>
-                        <div className="text-xs font-mono font-medium text-gray-800 mt-0.5 tabular-nums">
+                        <div className="text-[10px] text-slate-400">{m.label}</div>
+                        <div className="text-xs font-mono font-medium text-slate-100 mt-0.5 tabular-nums">
                           {m.value}
                         </div>
                       </div>
@@ -378,7 +491,7 @@ export default function Dashboard() {
                   </div>
                 )}
                 {!risk && (
-                  <p className="text-xs text-gray-400 text-center">
+                  <p className="text-xs text-slate-400 text-center">
                     {connected ? "Waiting for first price update…" : "Connecting to backend…"}
                   </p>
                 )}
@@ -417,8 +530,8 @@ export default function Dashboard() {
                       onClick={() => setSelectedSymbol(s)}
                       className={`text-xs px-2 py-0.5 rounded-full transition-colors ${
                         selectedSymbol === s
-                          ? "bg-gray-900 text-white"
-                          : "text-gray-500 hover:bg-gray-100"
+                          ? "bg-white text-slate-950"
+                          : "text-slate-400 hover:bg-white/6"
                       }`}
                     >
                       {s}
@@ -458,9 +571,9 @@ export default function Dashboard() {
                       { label: "Total deposited", value: (vault.total_deposited / 1e6).toFixed(2) + "M" },
                       { label: "Rebalances",       value: vault.total_rebalances },
                     ].map((s) => (
-                      <div key={s.label} className="bg-gray-50 rounded-lg p-2">
-                        <div className="text-[10px] text-gray-500">{s.label}</div>
-                        <div className="text-sm font-semibold text-gray-800">{s.value}</div>
+                      <div key={s.label} className="bg-white/5 rounded-xl p-2.5 border border-white/8">
+                        <div className="text-[10px] text-slate-400">{s.label}</div>
+                        <div className="text-sm font-semibold text-slate-100">{s.value}</div>
                       </div>
                     ))}
                   </div>
@@ -518,16 +631,18 @@ export default function Dashboard() {
             action={
               currentDecision && (
                 <div className="flex items-center gap-1.5">
-                  <TrendingUp size={12} className="text-gray-400" />
-                  <span className="text-xs text-gray-500">
+                  <TrendingUp size={12} className="text-slate-400" />
+                  <span className="text-xs text-slate-400">
                     Latest:{" "}
-                    <span className="font-semibold text-gray-700">{currentDecision.action}</span>
+                    <span className="font-semibold text-slate-100">{currentDecision.action}</span>
                   </span>
                 </div>
               )
             }
           >
-            <DecisionFeed decisions={decisions} />
+            <div className="content-auto">
+              <DecisionFeed decisions={decisions} />
+            </div>
           </Card>
         </motion.div>
 
@@ -541,20 +656,20 @@ export default function Dashboard() {
             <Card title="Current AI Analysis" subtitle="From the last pipeline run">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <p className="text-xs font-semibold text-gray-500 mb-1.5">Risk Analysis</p>
-                  <p className="text-sm text-gray-700 leading-relaxed bg-gray-50 rounded-xl p-3">
+                  <p className="text-xs font-semibold text-slate-400 mb-1.5">Risk Analysis</p>
+                  <p className="text-sm text-slate-200 leading-relaxed bg-white/5 rounded-xl p-3 border border-white/8">
                     {currentDecision.risk_analysis}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs font-semibold text-gray-500 mb-1.5">Yield Analysis</p>
-                  <p className="text-sm text-gray-700 leading-relaxed bg-gray-50 rounded-xl p-3">
+                  <p className="text-xs font-semibold text-slate-400 mb-1.5">Yield Analysis</p>
+                  <p className="text-sm text-slate-200 leading-relaxed bg-white/5 rounded-xl p-3 border border-white/8">
                     {currentDecision.yield_analysis}
                   </p>
                 </div>
                 <div className="md:col-span-2">
-                  <p className="text-xs font-semibold text-gray-500 mb-1.5">Strategy Rationale</p>
-                  <p className="text-sm text-gray-700 leading-relaxed bg-gray-50 rounded-xl p-3">
+                  <p className="text-xs font-semibold text-slate-400 mb-1.5">Strategy Rationale</p>
+                  <p className="text-sm text-slate-200 leading-relaxed bg-white/5 rounded-xl p-3 border border-white/8">
                     {currentDecision.rationale}
                   </p>
                 </div>
@@ -565,10 +680,10 @@ export default function Dashboard() {
 
         {/* ── Footer ── */}
         <div className="flex items-center justify-between py-2">
-          <p className="text-xs text-gray-400">StableGuard v3 · Solana Devnet</p>
+          <p className="text-xs text-slate-500">StableGuard v3 · Solana Devnet</p>
           <Link
             href="/settings"
-            className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-800 transition-colors"
+            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition-colors"
           >
             <Settings size={12} />
             Settings &amp; Alerts

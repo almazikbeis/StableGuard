@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"os"
 	"strconv"
 	"time"
 
@@ -31,6 +32,20 @@ import (
 
 func executionUnavailableNote() string {
 	return "Market execution is unavailable under the current custody architecture: vault token accounts are program-owned, so external routers like Jupiter cannot spend them directly. Use mode=record only for an explicit accounting-only allocation shift."
+}
+
+func authDebugResponsesEnabled() bool {
+	switch os.Getenv("STABLEGUARD_DEV_AUTH_DEBUG") {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func liveYieldStatus(cfg *config.Config) (string, string) {
+	readiness := cfg.YieldExecutionReadiness()
+	return readiness.Mode, readiness.Note
 }
 
 type controlProfile struct {
@@ -697,6 +712,7 @@ func (h *Handler) pipelineStatus(c *fiber.Ctx) error {
 			"action":        score.Action,
 			"summary":       score.Summary,
 		},
+		"policy":           h.pipe.LastPolicyEval(),
 		"last_exec_sig":    execSig,
 		"last_exec_status": execStatus,
 		"last_exec_note":   execNote,
@@ -1047,6 +1063,8 @@ func (h *Handler) streamFeed(c *fiber.Ctx) error {
 func (h *Handler) getSettings(c *fiber.Ctx) error {
 	telegramEnabled := h.alerter != nil && h.alerter.Enabled()
 	controlMode := deriveControlMode(h.cfg)
+	yieldMode, yieldModeNote := liveYieldStatus(h.cfg)
+	yieldReadiness := h.cfg.YieldExecutionReadiness()
 	return c.JSON(fiber.Map{
 		"alerts_enabled":          telegramEnabled,
 		"circuit_breaker_enabled": h.cfg != nil && h.cfg.CircuitBreakerEnabled,
@@ -1070,6 +1088,12 @@ func (h *Handler) getSettings(c *fiber.Ctx) error {
 		"yield_enabled": func() bool {
 			return h.cfg != nil && h.cfg.YieldEnabled
 		}(),
+		"yield_live_mode":             yieldMode,
+		"yield_live_note":             yieldModeNote,
+		"yield_mainnet_rpc":           yieldReadiness.MainnetRPC,
+		"yield_ready_for_live":        yieldReadiness.ReadyForLive,
+		"yield_missing_strategy_atas": yieldReadiness.MissingStrategyATAs,
+		"yield_missing_kamino_vaults": yieldReadiness.MissingKaminoVaults,
 		"yield_entry_risk": func() float64 {
 			if h.cfg == nil {
 				return 35
@@ -1094,6 +1118,9 @@ func (h *Handler) getSettings(c *fiber.Ctx) error {
 			}
 			return h.cfg.AlertRiskThreshold
 		}(),
+		"execution_mode": "record_only",
+		"custody_model":  "program_owned_vault_accounts",
+		"execution_note": executionUnavailableNote(),
 		"hub_subscribers": func() int {
 			if h.feedHub == nil {
 				return 0
@@ -1483,12 +1510,16 @@ func (h *Handler) authRegister(c *fiber.Ctx) error {
 
 	// In production, send via email service. For now, return in response (dev mode).
 	token, _ := auth.GenerateToken(userID, body.Email)
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+	resp := fiber.Map{
 		"token":   token,
 		"user_id": userID,
 		"email":   body.Email,
-		"otp":     otp, // remove this in prod; send via email instead
-	})
+	}
+	if authDebugResponsesEnabled() {
+		resp["otp"] = otp
+		resp["otp_debug"] = true
+	}
+	return c.Status(fiber.StatusCreated).JSON(resp)
 }
 
 // POST /api/v1/auth/login
@@ -1540,8 +1571,12 @@ func (h *Handler) authSendOTP(c *fiber.Ctx) error {
 	if h.store != nil {
 		_ = h.store.SaveOTP(body.Email, otp)
 	}
-	// In prod: send email. Dev: return code.
-	return c.JSON(fiber.Map{"ok": true, "otp": otp})
+	resp := fiber.Map{"ok": true}
+	if authDebugResponsesEnabled() {
+		resp["otp"] = otp
+		resp["otp_debug"] = true
+	}
+	return c.JSON(resp)
 }
 
 // POST /api/v1/auth/verify-otp

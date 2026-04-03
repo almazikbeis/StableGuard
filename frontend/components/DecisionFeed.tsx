@@ -56,8 +56,8 @@ function DecisionCard({ d }: { d: DecisionRow }) {
   return (
     <motion.div
       layout
-      className={`rounded-xl border overflow-hidden transition-colors ${
-        isAction ? "border-orange-100 bg-orange-50/30" : "border-gray-100 bg-gray-50"
+      className={`rounded-[20px] border overflow-hidden transition-colors ${
+        isAction ? "border-orange-300/20 bg-orange-400/8" : "border-white/8 bg-white/4"
       }`}
     >
       {/* Top row */}
@@ -73,30 +73,30 @@ function DecisionCard({ d }: { d: DecisionRow }) {
                 href={`https://explorer.solana.com/tx/${d.exec_sig}?cluster=devnet`}
                 target="_blank" rel="noreferrer"
                 onClick={e => e.stopPropagation()}
-                className="text-blue-400 hover:text-blue-600 transition-colors"
+                className="text-cyan-300 hover:text-cyan-200 transition-colors"
               >
                 <ExternalLink size={11} />
               </a>
             )}
-            <span className="text-[10px] text-gray-400 font-mono">{timeStr}</span>
+            <span className="text-[10px] text-slate-400 font-mono">{timeStr}</span>
             <motion.div animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.2 }}>
-              <ChevronDown size={13} className="text-gray-400" />
+              <ChevronDown size={13} className="text-slate-400" />
             </motion.div>
           </div>
         </div>
 
         {/* Rationale preview */}
-        <p className="text-xs text-gray-700 leading-relaxed line-clamp-2">{d.rationale}</p>
+        <p className="text-xs text-slate-200 leading-relaxed line-clamp-2">{d.rationale}</p>
 
         {/* Confidence + meta */}
         <div className="mt-2 flex items-center gap-3">
           <div className="flex-1">
             <ConfidenceBar value={d.confidence} />
           </div>
-          <span className="text-[10px] text-gray-400 flex-shrink-0">
-            risk {d.risk_level.toFixed(0)}
-            {isAction && ` · slot ${d.from_index}→${d.to_index}`}
-          </span>
+            <span className="text-[10px] text-slate-400 flex-shrink-0">
+              risk {d.risk_level.toFixed(0)}
+              {isAction && ` · slot ${d.from_index}→${d.to_index}`}
+            </span>
         </div>
       </button>
 
@@ -110,15 +110,15 @@ function DecisionCard({ d }: { d: DecisionRow }) {
             transition={{ duration: 0.22, ease: "easeInOut" }}
             className="overflow-hidden"
           >
-            <div className="px-3.5 pb-3.5 space-y-2.5 border-t border-gray-100 pt-3">
+            <div className="px-3.5 pb-3.5 space-y-2.5 border-t border-white/8 pt-3">
               {/* Risk analysis */}
               <div className="flex gap-2">
                 <div className="w-5 h-5 rounded bg-red-50 border border-red-100 flex items-center justify-center flex-shrink-0 mt-0.5">
                   <BarChart2 size={10} className="text-red-400" />
                 </div>
                 <div>
-                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Risk Analysis</p>
-                  <p className="text-xs text-gray-700 leading-relaxed">{d.risk_analysis}</p>
+                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-0.5">Risk Analysis</p>
+                  <p className="text-xs text-slate-200 leading-relaxed">{d.risk_analysis}</p>
                 </div>
               </div>
 
@@ -128,8 +128,8 @@ function DecisionCard({ d }: { d: DecisionRow }) {
                   <Zap size={10} className="text-green-500" />
                 </div>
                 <div>
-                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Yield Analysis</p>
-                  <p className="text-xs text-gray-700 leading-relaxed">{d.yield_analysis}</p>
+                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-0.5">Yield Analysis</p>
+                  <p className="text-xs text-slate-200 leading-relaxed">{d.yield_analysis}</p>
                 </div>
               </div>
 
@@ -139,25 +139,25 @@ function DecisionCard({ d }: { d: DecisionRow }) {
                   <Brain size={10} className="text-purple-400" />
                 </div>
                 <div>
-                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Strategy Rationale</p>
-                  <p className="text-xs text-gray-700 leading-relaxed">{d.rationale}</p>
+                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-0.5">Strategy Rationale</p>
+                  <p className="text-xs text-slate-200 leading-relaxed">{d.rationale}</p>
                 </div>
               </div>
 
               {/* Footer */}
-              <div className="flex items-center justify-between pt-1 border-t border-gray-100">
-                <span className="text-[10px] text-gray-400">{dateStr} · {timeStr}</span>
+              <div className="flex items-center justify-between pt-1 border-t border-white/8">
+                <span className="text-[10px] text-slate-400">{dateStr} · {timeStr}</span>
                 {d.exec_sig && d.exec_sig !== "" ? (
                   <a
                     href={`https://explorer.solana.com/tx/${d.exec_sig}?cluster=devnet`}
                     target="_blank" rel="noreferrer"
-                    className="flex items-center gap-1 text-[10px] text-blue-500 hover:text-blue-700 font-mono transition-colors"
+                    className="flex items-center gap-1 text-[10px] text-cyan-300 hover:text-cyan-200 font-mono transition-colors"
                   >
                     <ExternalLink size={9} />
                     {d.exec_sig.slice(0, 16)}…
                   </a>
                 ) : (
-                  <span className="text-[10px] text-gray-300">No on-chain tx</span>
+                  <span className="text-[10px] text-slate-500">No on-chain tx</span>
                 )}
               </div>
             </div>
@@ -175,8 +175,8 @@ interface Props {
 export function DecisionFeed({ decisions }: Props) {
   if (!decisions || decisions.length === 0) {
     return (
-      <div className="text-sm text-gray-400 py-8 text-center flex flex-col items-center gap-2">
-        <Brain size={24} className="text-gray-200" />
+      <div className="text-sm text-slate-400 py-8 text-center flex flex-col items-center gap-2">
+        <Brain size={24} className="text-slate-600" />
         No AI decisions yet — pipeline is warming up
       </div>
     );

@@ -68,6 +68,7 @@ func main() {
 
 	// ── Yield Aggregator ──────────────────────────────────────────────────
 	yieldAgg := yield.NewAggregator()
+	yieldReadiness := cfg.YieldExecutionReadiness()
 
 	// ── On-chain Whale Aggregator ─────────────────────────────────────────
 	whaleAgg := onchain.NewAggregator()
@@ -129,6 +130,15 @@ func main() {
 
 	log.Printf("  Yield Opt.  : enabled=%v minAPY=%.1f%% entryRisk=%.0f exitRisk=%.0f",
 		cfg.YieldEnabled, cfg.YieldMinAPY, cfg.YieldEntryRisk, cfg.YieldExitRisk)
+	log.Printf("  Yield Live  : mode=%s ready=%v mainnet=%v",
+		yieldReadiness.Mode, yieldReadiness.ReadyForLive, yieldReadiness.MainnetRPC)
+	if len(yieldReadiness.MissingStrategyATAs) > 0 {
+		log.Printf("  Yield ATAs  : missing=%v", yieldReadiness.MissingStrategyATAs)
+	}
+	if len(yieldReadiness.MissingKaminoVaults) > 0 {
+		log.Printf("  Yield Vaults: missing=%v", yieldReadiness.MissingKaminoVaults)
+	}
+	log.Printf("  Yield Note  : %s", yieldReadiness.Note)
 
 	handler := api.New(pythMonitor, llmClient, executor).
 		WithConfig(cfg).

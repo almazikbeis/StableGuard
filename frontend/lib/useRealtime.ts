@@ -21,6 +21,15 @@ export interface FeedMessage {
   };
   prices: Record<string, number>;
   max_deviation: number;
+  policy?: {
+    action_class: string;
+    verdict: "allowed" | "blocked" | "requires_approval";
+    reason: string;
+    control_mode: string;
+    auto_execute: boolean;
+    yield_enabled: boolean;
+    execution_intent: string;
+  };
   decision?: {
     action: string;
     from_index: number;
@@ -66,6 +75,7 @@ export function useRealtime(opts: UseRealtimeOptions = {}) {
   const failuresRef = useRef(0);
   const esRef = useRef<EventSource | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectRef = useRef<() => void>(() => {});
 
   const handleMsg = useCallback((msg: FeedMessage) => {
     if (msg.ping) return;
@@ -87,6 +97,7 @@ export function useRealtime(opts: UseRealtimeOptions = {}) {
           risk: data.risk ?? {},
           prices: {},
           max_deviation: data.risk?.deviation_pct ?? 0,
+          policy: data.policy,
           decision: data.decision,
           exec_sig: data.last_exec_sig,
           exec_status: data.last_exec_status,
@@ -127,10 +138,16 @@ export function useRealtime(opts: UseRealtimeOptions = {}) {
         startPolling();
       } else {
         // retry after 3s
-        setTimeout(connectSSE, 3000);
+        setTimeout(() => {
+          reconnectRef.current();
+        }, 3000);
       }
     };
   }, [handleMsg, startPolling]);
+
+  useEffect(() => {
+    reconnectRef.current = connectSSE;
+  }, [connectSSE]);
 
   useEffect(() => {
     connectSSE();

@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -69,6 +70,25 @@ type Config struct {
 	YieldExitRisk float64
 	// YieldDepositUSDC: amount of USDC-equivalent to deposit in each cycle (default 1000)
 	YieldDepositAmount float64
+	// Trusted strategy token accounts used by autonomous YIELD_MAX transfers.
+	YieldStrategyUSDCAccount  string
+	YieldStrategyUSDTAccount  string
+	YieldStrategyDAIAccount   string
+	YieldStrategyPYUSDAccount string
+	// Trusted Kamino Earn vault addresses used by autonomous YIELD_MAX deposits.
+	YieldKaminoUSDCVault  string
+	YieldKaminoUSDTVault  string
+	YieldKaminoDAIVault   string
+	YieldKaminoPYUSDVault string
+}
+
+type YieldReadiness struct {
+	Mode                string
+	MainnetRPC          bool
+	MissingStrategyATAs []string
+	MissingKaminoVaults []string
+	ReadyForLive        bool
+	Note                string
 }
 
 func Load() *Config {
@@ -93,10 +113,10 @@ func Load() *Config {
 		StreamPollFallbackSec: getInt("STREAM_POLL_FALLBACK_SEC", 5),
 		DBPath:                getOrDefault("DB_PATH", "stableguard.db"),
 
-		TelegramBotToken:  os.Getenv("TELEGRAM_BOT_TOKEN"),
-		TelegramChatID:    os.Getenv("TELEGRAM_CHAT_ID"),
-		DiscordWebhookURL: os.Getenv("DISCORD_WEBHOOK_URL"),
-		AlertCooldownSec:  getInt("ALERT_COOLDOWN_SEC", 300),
+		TelegramBotToken:   os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:     os.Getenv("TELEGRAM_CHAT_ID"),
+		DiscordWebhookURL:  os.Getenv("DISCORD_WEBHOOK_URL"),
+		AlertCooldownSec:   getInt("ALERT_COOLDOWN_SEC", 300),
 		AlertRiskThreshold: getFloat("ALERT_RISK_THRESHOLD", 80),
 
 		CircuitBreakerEnabled:      getBool("CIRCUIT_BREAKER_ENABLED", true),
@@ -107,11 +127,19 @@ func Load() *Config {
 		AgentPubkey:     os.Getenv("AGENT_PUBKEY"),
 		VaultLUTAddress: os.Getenv("VAULT_LUT_ADDRESS"),
 
-		YieldEnabled:       getBool("YIELD_ENABLED", false),
-		YieldMinAPY:        getFloat("YIELD_MIN_APY", 4.0),
-		YieldEntryRisk:     getFloat("YIELD_ENTRY_RISK", 35.0),
-		YieldExitRisk:      getFloat("YIELD_EXIT_RISK", 55.0),
-		YieldDepositAmount: getFloat("YIELD_DEPOSIT_AMOUNT", 1000.0),
+		YieldEnabled:              getBool("YIELD_ENABLED", false),
+		YieldMinAPY:               getFloat("YIELD_MIN_APY", 4.0),
+		YieldEntryRisk:            getFloat("YIELD_ENTRY_RISK", 35.0),
+		YieldExitRisk:             getFloat("YIELD_EXIT_RISK", 55.0),
+		YieldDepositAmount:        getFloat("YIELD_DEPOSIT_AMOUNT", 1000.0),
+		YieldStrategyUSDCAccount:  os.Getenv("YIELD_STRATEGY_USDC_ACCOUNT"),
+		YieldStrategyUSDTAccount:  os.Getenv("YIELD_STRATEGY_USDT_ACCOUNT"),
+		YieldStrategyDAIAccount:   os.Getenv("YIELD_STRATEGY_DAI_ACCOUNT"),
+		YieldStrategyPYUSDAccount: os.Getenv("YIELD_STRATEGY_PYUSD_ACCOUNT"),
+		YieldKaminoUSDCVault:      os.Getenv("YIELD_KAMINO_USDC_VAULT"),
+		YieldKaminoUSDTVault:      os.Getenv("YIELD_KAMINO_USDT_VAULT"),
+		YieldKaminoDAIVault:       os.Getenv("YIELD_KAMINO_DAI_VAULT"),
+		YieldKaminoPYUSDVault:     os.Getenv("YIELD_KAMINO_PYUSD_VAULT"),
 	}
 }
 
@@ -158,4 +186,66 @@ func getBool(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+func IsMainnetRPC(rpcURL string) bool {
+	u := strings.ToLower(rpcURL)
+	return strings.Contains(u, "mainnet") || strings.Contains(u, "helius") || strings.Contains(u, "quiknode") || strings.Contains(u, "alchemy")
+}
+
+func (c *Config) YieldExecutionReadiness() YieldReadiness {
+	if c == nil || !c.YieldEnabled {
+		return YieldReadiness{
+			Mode:         "disabled",
+			MainnetRPC:   false,
+			ReadyForLive: false,
+			Note:         "Yield automation is disabled.",
+		}
+	}
+
+	readiness := YieldReadiness{
+		Mode:       "strategy_only",
+		MainnetRPC: IsMainnetRPC(c.SolanaRPCURL),
+	}
+
+	if c.YieldStrategyUSDCAccount == "" {
+		readiness.MissingStrategyATAs = append(readiness.MissingStrategyATAs, "YIELD_STRATEGY_USDC_ACCOUNT")
+	}
+	if c.YieldStrategyUSDTAccount == "" {
+		readiness.MissingStrategyATAs = append(readiness.MissingStrategyATAs, "YIELD_STRATEGY_USDT_ACCOUNT")
+	}
+	if c.YieldStrategyDAIAccount == "" {
+		readiness.MissingStrategyATAs = append(readiness.MissingStrategyATAs, "YIELD_STRATEGY_DAI_ACCOUNT")
+	}
+	if c.YieldStrategyPYUSDAccount == "" {
+		readiness.MissingStrategyATAs = append(readiness.MissingStrategyATAs, "YIELD_STRATEGY_PYUSD_ACCOUNT")
+	}
+
+	if c.YieldKaminoUSDCVault == "" {
+		readiness.MissingKaminoVaults = append(readiness.MissingKaminoVaults, "YIELD_KAMINO_USDC_VAULT")
+	}
+	if c.YieldKaminoUSDTVault == "" {
+		readiness.MissingKaminoVaults = append(readiness.MissingKaminoVaults, "YIELD_KAMINO_USDT_VAULT")
+	}
+	if c.YieldKaminoDAIVault == "" {
+		readiness.MissingKaminoVaults = append(readiness.MissingKaminoVaults, "YIELD_KAMINO_DAI_VAULT")
+	}
+	if c.YieldKaminoPYUSDVault == "" {
+		readiness.MissingKaminoVaults = append(readiness.MissingKaminoVaults, "YIELD_KAMINO_PYUSD_VAULT")
+	}
+
+	switch {
+	case !readiness.MainnetRPC:
+		readiness.Mode = "strategy_only"
+		readiness.Note = "Yield mode can move funds into trusted strategy accounts, but live Kamino execution is blocked until the backend uses a mainnet RPC."
+	case len(readiness.MissingStrategyATAs) > 0 || len(readiness.MissingKaminoVaults) > 0:
+		readiness.Mode = "strategy_only"
+		readiness.Note = "Yield mode is missing trusted strategy accounts or Kamino vault configuration, so live execution is not ready."
+	default:
+		readiness.Mode = "live"
+		readiness.ReadyForLive = true
+		readiness.Note = "Yield mode is fully configured for live external execution."
+	}
+
+	return readiness
 }

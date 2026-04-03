@@ -14,12 +14,15 @@ import (
 	"stableguard-backend/alerts"
 	"stableguard-backend/config"
 	"stableguard-backend/hub"
+	"stableguard-backend/policy"
 	"stableguard-backend/pyth"
 	"stableguard-backend/risk"
 	solanaexec "stableguard-backend/solana"
 	"stableguard-backend/store"
 	"stableguard-backend/yield"
 )
+
+const maxUint64Decimal = "18446744073709551615"
 
 // Engine is the real-time decision pipeline.
 type Engine struct {
@@ -35,6 +38,7 @@ type Engine struct {
 
 	mu                    sync.RWMutex
 	lastDecision          *ai.FinalDecision
+	lastPolicyEval        policy.Evaluation
 	lastScore             risk.ScoreV2
 	lastExecSig           string
 	lastExecStatus        string
@@ -181,6 +185,7 @@ func (e *Engine) Run(ctx context.Context) {
 
 			e.mu.Lock()
 			e.lastDecision = decision
+			e.lastPolicyEval = policy.Evaluate(e.cfg, decision)
 			e.mu.Unlock()
 
 			log.Printf("[pipeline] decision: action=%s from=%d to=%d frac=%.2f conf=%d | %s",
@@ -213,8 +218,24 @@ func (e *Engine) Run(ctx context.Context) {
 			}
 
 			// ── Step 9: Execute on-chain (optional) ───────────────────────
-			if e.cfg.AutoExecute && decision.Action != ai.ActionHold {
+			policyEval := policy.Evaluate(e.cfg, decision)
+			if policyEval.Verdict == policy.VerdictAllowed && e.cfg.AutoExecute && decision.Action != ai.ActionHold {
 				e.executeDecision(ctx, decision, score, balances)
+			} else {
+				e.mu.Lock()
+				e.lastExecSig = ""
+				switch policyEval.Verdict {
+				case policy.VerdictBlocked:
+					e.lastExecStatus = "blocked_by_policy"
+					e.lastExecNote = policyEval.Reason
+				case policy.VerdictRequiresApproval:
+					e.lastExecStatus = "approval_required"
+					e.lastExecNote = policyEval.Reason
+				default:
+					e.lastExecStatus = "standby"
+					e.lastExecNote = "No execution requested by the current AI decision."
+				}
+				e.mu.Unlock()
 			}
 
 			// ── Step 10: Yield optimizer (Variant B — tracked position) ───
@@ -325,6 +346,7 @@ type FeedMessage struct {
 	Prices       map[string]float64 `json:"prices"`
 	MaxDeviation float64            `json:"max_deviation"`
 	Decision     *ai.FinalDecision  `json:"decision,omitempty"`
+	Policy       policy.Evaluation  `json:"policy"`
 	ExecSig      string             `json:"exec_sig,omitempty"`
 	ExecStatus   string             `json:"exec_status,omitempty"`
 	ExecNote     string             `json:"exec_note,omitempty"`
@@ -340,6 +362,7 @@ func (e *Engine) broadcastUpdate(snap *pyth.PriceSnapshot, score risk.ScoreV2) {
 
 	e.mu.RLock()
 	dec := e.lastDecision
+	pol := e.lastPolicyEval
 	sig := e.lastExecSig
 	status := e.lastExecStatus
 	note := e.lastExecNote
@@ -351,6 +374,7 @@ func (e *Engine) broadcastUpdate(snap *pyth.PriceSnapshot, score risk.ScoreV2) {
 		Prices:       prices,
 		MaxDeviation: snap.MaxDeviation(),
 		Decision:     dec,
+		Policy:       pol,
 		ExecSig:      sig,
 		ExecStatus:   status,
 		ExecNote:     note,
@@ -460,6 +484,12 @@ func (e *Engine) LastDecision() *ai.FinalDecision {
 	return e.lastDecision
 }
 
+func (e *Engine) LastPolicyEval() policy.Evaluation {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastPolicyEval
+}
+
 func (e *Engine) LastScore() risk.ScoreV2 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -513,7 +543,81 @@ func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *
 		elapsed := time.Since(pos.DepositedAt).Seconds()
 		earned := pos.Amount * (pos.EntryAPY / 100) / (365.25 * 24 * 3600) * elapsed
 
-		if err := e.store.CloseYieldPosition(pos.ID, earned, "simulated-exit"); err != nil {
+		if strategyTokenAccount := e.strategyTokenAccount(pos.Token); strategyTokenAccount != "" {
+			tokenIndex, ok := tokenIndexBySymbol(pos.Token)
+			if !ok {
+				log.Printf("[yield] EXIT blocked: token %s is not registered in ActiveFeeds", pos.Token)
+				e.mu.Lock()
+				e.lastExecSig = ""
+				e.lastExecStatus = "failed"
+				e.lastExecNote = "Yield exit failed: token is not mapped to a vault slot."
+				e.mu.Unlock()
+				return
+			}
+			liveYieldEnabled, liveYieldReason := e.liveYieldMode()
+			if kvault := e.kaminoVault(pos.Token); kvault != "" && pos.Protocol == string(yield.ProtocolKamino) && liveYieldEnabled {
+				txB64, err := yield.BuildKaminoWithdrawTx(ctx, e.executor.WalletAddress().String(), kvault, maxUint64Decimal)
+				if err != nil {
+					log.Printf("[yield] EXIT Kamino withdraw build failed: %v", err)
+					e.mu.Lock()
+					e.lastExecSig = ""
+					e.lastExecStatus = "failed"
+					e.lastExecNote = "Yield exit failed while building the Kamino withdraw transaction."
+					e.mu.Unlock()
+					return
+				}
+				sig, err := e.executor.SendExternalTransaction(ctx, txB64)
+				if err != nil {
+					log.Printf("[yield] EXIT Kamino withdraw failed: %v", err)
+					e.mu.Lock()
+					e.lastExecSig = ""
+					e.lastExecStatus = "failed"
+					e.lastExecNote = "Yield exit failed while withdrawing from Kamino."
+					e.mu.Unlock()
+					return
+				}
+				log.Printf("[yield] EXIT Kamino withdraw tx: %s", sig)
+			} else if kvault != "" && pos.Protocol == string(yield.ProtocolKamino) && !liveYieldEnabled {
+				log.Printf("[yield] EXIT live Kamino withdraw skipped: %s", liveYieldReason)
+			}
+
+			strategyBalance, err := e.executor.TokenAccountBalance(ctx, strategyTokenAccount)
+			if err != nil {
+				log.Printf("[yield] EXIT strategy balance fetch failed: %v", err)
+				e.mu.Lock()
+				e.lastExecSig = ""
+				e.lastExecStatus = "failed"
+				e.lastExecNote = "Yield exit failed while reading the trusted strategy account balance."
+				e.mu.Unlock()
+				return
+			}
+			if strategyBalance == 0 {
+				log.Printf("[yield] EXIT skipped: strategy account balance is zero")
+			} else {
+				sig, err := e.executor.SendDeposit(ctx, strategyBalance, strategyTokenAccount, tokenIndex)
+				if err != nil {
+					log.Printf("[yield] EXIT deposit-back failed: %v", err)
+					e.mu.Lock()
+					e.lastExecSig = ""
+					e.lastExecStatus = "failed"
+					e.lastExecNote = "Yield exit failed while returning funds from the strategy account back into the vault."
+					e.mu.Unlock()
+					return
+				}
+				e.mu.Lock()
+				e.lastExecSig = sig
+				e.lastExecStatus = "executed"
+				e.lastExecNote = fmt.Sprintf("Yield exit returned %s from the trusted strategy account back into the vault.", pos.Token)
+				e.mu.Unlock()
+				log.Printf("[yield] EXIT return tx: %s", sig)
+			}
+		}
+
+		withdrawSig := "simulated-exit"
+		if e.lastExecStatus == "executed" {
+			withdrawSig = e.lastExecSig
+		}
+		if err := e.store.CloseYieldPosition(pos.ID, earned, withdrawSig); err != nil {
 			log.Printf("[yield] close position failed: %v", err)
 			return
 		}
@@ -556,13 +660,82 @@ func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *
 	}
 
 	amount := e.cfg.YieldDepositAmount
+	amountBaseUnits := uint64(amount * 1_000_000)
+	tokenIndex, ok := tokenIndexBySymbol(best.Token)
+	if !ok {
+		log.Printf("[yield] token %s is not mapped to a vault slot", best.Token)
+		return
+	}
+	strategyTokenAccount := e.strategyTokenAccount(best.Token)
+	if strategyTokenAccount == "" {
+		log.Printf("[yield] no trusted strategy token account configured for %s", best.Token)
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "blocked_by_policy"
+		e.lastExecNote = fmt.Sprintf("YIELD_MAX selected %s, but no trusted strategy account is configured for that token.", best.Token)
+		e.mu.Unlock()
+		return
+	}
+
+	depositSig, err := e.executor.SendPayment(ctx, amountBaseUnits, strategyTokenAccount, tokenIndex)
+	if err != nil {
+		log.Printf("[yield] send_payment failed: %v", err)
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "failed"
+		e.lastExecNote = "Yield entry failed while transferring funds into the trusted strategy account."
+		e.mu.Unlock()
+		return
+	}
+
+	e.mu.Lock()
+	e.lastExecSig = depositSig
+	e.lastExecStatus = "executed"
+	e.lastExecNote = fmt.Sprintf("Yield entry moved %s into the trusted strategy account for autonomous deployment.", best.Token)
+	e.mu.Unlock()
+
+	liveDepositSig := depositSig
+	liveYieldEnabled, liveYieldReason := e.liveYieldMode()
+	if kvault := e.kaminoVault(best.Token); kvault != "" && best.Protocol == yield.ProtocolKamino && liveYieldEnabled {
+		txB64, err := yield.BuildKaminoDepositTx(ctx, e.executor.WalletAddress().String(), kvault, fmt.Sprintf("%.6f", amount))
+		if err != nil {
+			log.Printf("[yield] Kamino deposit build failed: %v", err)
+			e.mu.Lock()
+			e.lastExecStatus = "failed"
+			e.lastExecNote = "Yield entry transferred funds, but Kamino deposit transaction build failed."
+			e.mu.Unlock()
+			return
+		}
+		kaminoSig, err := e.executor.SendExternalTransaction(ctx, txB64)
+		if err != nil {
+			log.Printf("[yield] Kamino deposit failed: %v", err)
+			e.mu.Lock()
+			e.lastExecStatus = "failed"
+			e.lastExecNote = "Yield entry transferred funds, but live Kamino deposit failed."
+			e.mu.Unlock()
+			return
+		}
+		liveDepositSig = kaminoSig
+		e.mu.Lock()
+		e.lastExecSig = kaminoSig
+		e.lastExecStatus = "executed"
+		e.lastExecNote = fmt.Sprintf("Yield entry deposited %s into Kamino automatically.", best.Token)
+		e.mu.Unlock()
+		log.Printf("[yield] Kamino deposit tx: %s", kaminoSig)
+	} else if kvault := e.kaminoVault(best.Token); kvault != "" && best.Protocol == yield.ProtocolKamino && !liveYieldEnabled {
+		e.mu.Lock()
+		e.lastExecSig = depositSig
+		e.lastExecStatus = "executed"
+		e.lastExecNote = fmt.Sprintf("Yield entry moved %s into the trusted strategy account, but live Kamino execution is paused: %s", best.Token, liveYieldReason)
+		e.mu.Unlock()
+	}
 
 	posID, err := e.store.SaveYieldPosition(
 		string(best.Protocol),
 		best.Token,
 		amount,
 		best.SupplyAPY,
-		"simulated-deposit",
+		liveDepositSig,
 	)
 	if err != nil {
 		log.Printf("[yield] save position failed: %v", err)
@@ -573,14 +746,72 @@ func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *
 	e.activeYieldPositionID = posID
 	e.mu.Unlock()
 
-	log.Printf("[yield] ENTER: deposited %.0f %s into %s @ %.2f%% APY (simulated, posID=%d)",
-		amount, best.Token, best.DisplayName, best.SupplyAPY, posID)
+	log.Printf("[yield] ENTER: transferred %.0f %s into trusted strategy account for %s @ %.2f%% APY estimate (posID=%d sig=%s)",
+		amount, best.Token, best.DisplayName, best.SupplyAPY, posID, depositSig)
 
 	if e.alerter != nil {
 		e.alerter.Send("yield_enter", alerts.LevelInfo,
 			fmt.Sprintf("💰 Yield position opened\nProtocol: *%s* | Token: %s\nAmount: *$%.0f* @ *%.2f%%* APY\nRisk: %.0f (safe to enter)",
 				best.DisplayName, best.Token, amount, best.SupplyAPY, score.RiskLevel))
 	}
+}
+
+func (e *Engine) strategyTokenAccount(token string) string {
+	if e.cfg == nil {
+		return ""
+	}
+	switch token {
+	case "USDC":
+		return e.cfg.YieldStrategyUSDCAccount
+	case "USDT":
+		return e.cfg.YieldStrategyUSDTAccount
+	case "DAI":
+		return e.cfg.YieldStrategyDAIAccount
+	case "PYUSD":
+		return e.cfg.YieldStrategyPYUSDAccount
+	default:
+		return ""
+	}
+}
+
+func (e *Engine) kaminoVault(token string) string {
+	if e.cfg == nil {
+		return ""
+	}
+	switch token {
+	case "USDC":
+		return e.cfg.YieldKaminoUSDCVault
+	case "USDT":
+		return e.cfg.YieldKaminoUSDTVault
+	case "DAI":
+		return e.cfg.YieldKaminoDAIVault
+	case "PYUSD":
+		return e.cfg.YieldKaminoPYUSDVault
+	default:
+		return ""
+	}
+}
+
+func (e *Engine) liveYieldMode() (bool, string) {
+	if e.cfg == nil {
+		return false, "runtime config is not attached"
+	}
+	if !e.cfg.YieldEnabled {
+		return false, "yield mode is disabled"
+	}
+	if !config.IsMainnetRPC(e.cfg.SolanaRPCURL) {
+		return false, "live yield mode is disabled because the backend is not connected to a mainnet RPC"
+	}
+	return true, ""
+}
+
+func tokenIndexBySymbol(symbol string) (uint8, bool) {
+	for _, feed := range pyth.ActiveFeeds {
+		if feed.Symbol == symbol && feed.VaultSlot >= 0 {
+			return uint8(feed.VaultSlot), true
+		}
+	}
+	return 0, false
 }
 
 // minPriceU64 returns the minimum price across all tokens as a uint64

@@ -122,10 +122,18 @@ export function YieldOpportunities({ className = "" }: Props) {
           </div>
         ) : (
           <div className="mt-2 space-y-1">
+            {!hasLive && (
+              <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                <p className="text-[11px] font-medium text-amber-800">
+                  Estimated APYs only. Treat these as placeholders until a live adapter responds.
+                </p>
+              </div>
+            )}
             {/* Column headers */}
-            <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 px-2 mb-1">
+            <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-3 px-2 mb-1">
               <span className="text-[10px] text-gray-400 uppercase tracking-wide">Protocol</span>
               <span className="text-[10px] text-gray-400 uppercase tracking-wide text-right">Token</span>
+              <span className="text-[10px] text-gray-400 uppercase tracking-wide text-right">Source</span>
               <span className="text-[10px] text-gray-400 uppercase tracking-wide text-right">Supply APY</span>
               <span className="text-[10px] text-gray-400 uppercase tracking-wide text-right hidden sm:block">TVL</span>
               <span className="text-[10px] text-gray-400 uppercase tracking-wide text-right hidden sm:block">Util</span>
@@ -143,7 +151,7 @@ export function YieldOpportunities({ className = "" }: Props) {
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, x: -8 }}
                     transition={{ delay: i * 0.04 }}
-                    className={`grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 items-center px-2 py-2 rounded-lg hover:bg-gray-50 transition-colors ${
+                    className={`grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-3 items-center px-2 py-2 rounded-lg hover:bg-gray-50 transition-colors ${
                       isBest ? "ring-1 ring-green-200 bg-green-50/50" : ""
                     }`}
                   >
@@ -168,6 +176,14 @@ export function YieldOpportunities({ className = "" }: Props) {
                     {/* Token */}
                     <span className="text-xs font-mono font-semibold text-gray-700 text-right">
                       {opp.token}
+                    </span>
+
+                    <span
+                      className={`text-[10px] font-bold uppercase tracking-wide text-right ${
+                        opp.is_live ? "text-green-600" : "text-amber-700"
+                      }`}
+                    >
+                      {opp.is_live ? "Live" : "Est."}
                     </span>
 
                     {/* APY */}
