@@ -7,6 +7,7 @@ import {
   ReferenceLine, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import { Brain, TrendingDown, TrendingUp, Minus, AlertTriangle, RefreshCw, Loader2, Zap } from "lucide-react";
+import { isStableSymbol } from "@/lib/assets";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v1";
 
@@ -87,7 +88,22 @@ function TrendIcon({ trend }: { trend: string }) {
   return <Minus size={13} className="text-gray-400" />;
 }
 
-const CustomTooltip = ({ active, payload, label }: any) => {
+interface ForecastTooltipPayload {
+  payload?: {
+    price?: number;
+    predicted?: number;
+    low?: number;
+    high?: number;
+  };
+}
+
+interface ForecastTooltipProps {
+  active?: boolean;
+  payload?: ForecastTooltipPayload[];
+  label?: string;
+}
+
+const CustomTooltip = ({ active, payload, label }: ForecastTooltipProps) => {
   if (!active || !payload?.length) return null;
   const d = payload[0]?.payload;
   return (
@@ -97,7 +113,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
       {d?.predicted != null && (
         <>
           <p className="text-orange-600 font-mono font-semibold">pred: {d.predicted.toFixed(5)}</p>
-          {d.low != null && <p className="text-gray-400 font-mono">CI: {d.low.toFixed(5)} – {d.high.toFixed(5)}</p>}
+          {d.low != null && d.high != null && <p className="text-gray-400 font-mono">CI: {d.low.toFixed(5)} – {d.high.toFixed(5)}</p>}
         </>
       )}
     </div>
@@ -111,6 +127,7 @@ interface Props {
 export function DepegForecast({ symbol = "USDC" }: Props) {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const stableAsset = isStableSymbol(symbol);
 
   const fetch = useCallback(async () => {
     setLoading(true);
@@ -146,7 +163,9 @@ export function DepegForecast({ symbol = "USDC" }: Props) {
             <Brain size={13} className="text-purple-500" />
           </div>
           <div>
-            <span className="text-sm font-semibold text-gray-900">Depeg Forecast</span>
+            <span className="text-sm font-semibold text-gray-900">
+              {stableAsset ? "Depeg Forecast" : "Market Forecast"}
+            </span>
             <span className="text-xs text-gray-400 ml-2">Chronos T5 · 4h horizon</span>
           </div>
         </div>
@@ -196,8 +215,8 @@ export function DepegForecast({ symbol = "USDC" }: Props) {
             >
               {/* Probability badges */}
               <div className="grid grid-cols-3 gap-2">
-                <ProbBadge prob={pred.depeg_probability}  label="Depeg risk" />
-                <ProbBadge prob={pred.severe_probability} label="Severe risk" />
+                <ProbBadge prob={pred.depeg_probability} label={stableAsset ? "Depeg risk" : "Downside risk"} />
+                <ProbBadge prob={pred.severe_probability} label={stableAsset ? "Severe risk" : "Severe downside"} />
                 <div className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2.5 flex flex-col items-center">
                   <div className="flex items-center gap-1 mt-0.5">
                     <TrendIcon trend={pred.trend} />
@@ -216,7 +235,7 @@ export function DepegForecast({ symbol = "USDC" }: Props) {
                 >
                   <AlertTriangle size={13} className="text-orange-500 flex-shrink-0" />
                   <p className="text-xs text-orange-700">
-                    Model predicts peg may weaken in{" "}
+                    Model predicts {stableAsset ? "peg stress" : "market weakness"} in{" "}
                     <span className="font-bold">{pred.hours_to_warning}h</span> — monitoring closely
                   </p>
                 </motion.div>
@@ -243,10 +262,12 @@ export function DepegForecast({ symbol = "USDC" }: Props) {
                     />
                     <Tooltip content={<CustomTooltip />} />
 
-                    {/* Peg reference line */}
-                    <ReferenceLine y={1.0} stroke="#d1d5db" strokeDasharray="4 2" strokeWidth={1} />
-                    {/* Warning zone */}
-                    <ReferenceLine y={0.998} stroke="#f97316" strokeDasharray="3 2" strokeWidth={1} label={{ value: "0.998", fill: "#f97316", fontSize: 8 }} />
+                    {stableAsset && (
+                      <ReferenceLine y={1.0} stroke="#d1d5db" strokeDasharray="4 2" strokeWidth={1} />
+                    )}
+                    {stableAsset && (
+                      <ReferenceLine y={0.998} stroke="#f97316" strokeDasharray="3 2" strokeWidth={1} label={{ value: "0.998", fill: "#f97316", fontSize: 8 }} />
+                    )}
 
                     {/* Confidence band */}
                     <Area

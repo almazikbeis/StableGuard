@@ -34,7 +34,13 @@ type driftSpotMarketStats struct {
 }
 
 func (d *DriftAdapter) FetchOpportunities(ctx context.Context) ([]Opportunity, error) {
-	// Drift publishes spot market stats as JSON on S3.
+	// 1. Try DeFiLlama (real, publicly accessible)
+	if opps, err := FetchDefiLlamaPools(ctx, ProtocolDrift); err == nil && len(opps) > 0 {
+		log.Printf("[yield/drift] DeFiLlama: %d pools (live)", len(opps))
+		return opps, nil
+	}
+
+	// 2. Try Drift's own S3 stats endpoint
 	url := driftBaseURL + "/program/drift/network/mainnet/spot_market_stats/latest.json"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -62,14 +68,12 @@ func (d *DriftAdapter) FetchOpportunities(ctx context.Context) ([]Opportunity, e
 	now := time.Now().Unix()
 	var opps []Opportunity
 	for _, m := range markets {
-		if !isStable(m.Symbol) {
-			continue
-		}
 		opps = append(opps, Opportunity{
 			Protocol:    ProtocolDrift,
 			DisplayName: "Drift Lend",
 			URL:         "https://app.drift.trade/earn",
 			Token:       strings.ToUpper(m.Symbol),
+			AssetType:   AssetTypeFor(strings.ToUpper(m.Symbol)),
 			SupplyAPY:   m.DepositAPY,
 			BorrowAPY:   m.BorrowAPY,
 			TVLMillions: m.TotalDeposits / 1_000_000,
@@ -89,17 +93,10 @@ func (d *DriftAdapter) FetchOpportunities(ctx context.Context) ([]Opportunity, e
 func (d *DriftAdapter) fallback() []Opportunity {
 	now := time.Now().Unix()
 	return []Opportunity{
-		{
-			Protocol: ProtocolDrift, DisplayName: "Drift Lend",
-			URL: "https://app.drift.trade/earn", Token: "USDC",
-			SupplyAPY: 9.14, BorrowAPY: 14.30, TVLMillions: 98, UtilRate: 0.76,
-			UpdatedAt: now, IsLive: false,
-		},
-		{
-			Protocol: ProtocolDrift, DisplayName: "Drift Lend",
-			URL: "https://app.drift.trade/earn", Token: "USDT",
-			SupplyAPY: 8.67, BorrowAPY: 13.90, TVLMillions: 74, UtilRate: 0.72,
-			UpdatedAt: now, IsLive: false,
-		},
+		{Protocol: ProtocolDrift, DisplayName: "Drift Lend", URL: "https://app.drift.trade/earn", Token: "USDC", AssetType: "stable",   SupplyAPY: 9.14, BorrowAPY: 14.30, TVLMillions: 98,  UtilRate: 0.76, UpdatedAt: now, IsLive: false},
+		{Protocol: ProtocolDrift, DisplayName: "Drift Lend", URL: "https://app.drift.trade/earn", Token: "USDT", AssetType: "stable",   SupplyAPY: 8.67, BorrowAPY: 13.90, TVLMillions: 74,  UtilRate: 0.72, UpdatedAt: now, IsLive: false},
+		{Protocol: ProtocolDrift, DisplayName: "Drift Lend", URL: "https://app.drift.trade/earn", Token: "SOL",  AssetType: "volatile", SupplyAPY: 7.45, BorrowAPY: 11.60, TVLMillions: 220, UtilRate: 0.73, UpdatedAt: now, IsLive: false},
+		{Protocol: ProtocolDrift, DisplayName: "Drift Lend", URL: "https://app.drift.trade/earn", Token: "ETH",  AssetType: "volatile", SupplyAPY: 2.48, BorrowAPY: 4.70,  TVLMillions: 65,  UtilRate: 0.60, UpdatedAt: now, IsLive: false},
+		{Protocol: ProtocolDrift, DisplayName: "Drift Lend", URL: "https://app.drift.trade/earn", Token: "BTC",  AssetType: "volatile", SupplyAPY: 1.65, BorrowAPY: 3.40,  TVLMillions: 88,  UtilRate: 0.55, UpdatedAt: now, IsLive: false},
 	}
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
   BarChart,
@@ -12,6 +12,7 @@ import {
   Cell,
 } from "recharts";
 import { Activity, AlertTriangle, CheckCircle2, TrendingDown } from "lucide-react";
+import { defaultCounterpartySymbol, getAssetMeta } from "@/lib/assets";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v1";
 
@@ -36,10 +37,16 @@ interface SlippageResponse {
 export function SlippageAnalysis({ symbol = "USDC" }: { symbol?: string }) {
   const [data, setData] = useState<SlippageResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const inputAsset = getAssetMeta(symbol) ?? getAssetMeta("USDC");
+  const outputAsset = getAssetMeta(defaultCounterpartySymbol(symbol)) ?? getAssetMeta("USDT");
 
-  async function fetchSlippage() {
+  const fetchSlippage = useCallback(async () => {
     try {
-      const res = await fetch(`${BASE}/onchain/slippage`);
+      const params = new URLSearchParams({
+        input: inputAsset?.mainnetMint ?? "",
+        output: outputAsset?.mainnetMint ?? "",
+      });
+      const res = await fetch(`${BASE}/onchain/slippage?${params.toString()}`);
       if (!res.ok) return;
       const json = await res.json();
       setData(json);
@@ -48,13 +55,13 @@ export function SlippageAnalysis({ symbol = "USDC" }: { symbol?: string }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [inputAsset?.mainnetMint, outputAsset?.mainnetMint]);
 
   useEffect(() => {
     fetchSlippage();
     const t = setInterval(fetchSlippage, 60_000);
     return () => clearInterval(t);
-  }, []);
+  }, [fetchSlippage]);
 
   const current = data?.current;
   const score = current?.liquidity_score ?? 100;
@@ -101,7 +108,9 @@ export function SlippageAnalysis({ symbol = "USDC" }: { symbol?: string }) {
             <Activity size={14} className="text-purple-500" />
             Liquidity Depth
           </h3>
-          <p className="text-xs text-gray-400 mt-0.5">Jupiter mainnet · {symbol}/USDT</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Jupiter mainnet · {inputAsset?.symbol ?? symbol}/{outputAsset?.symbol ?? "USDT"}
+          </p>
         </div>
 
         {!loading && current && (
@@ -177,7 +186,9 @@ export function SlippageAnalysis({ symbol = "USDC" }: { symbol?: string }) {
       )}
 
       {data?.note && (
-        <p className="text-[10px] text-gray-400 mt-2">{data.note}</p>
+        <p className="text-[10px] text-gray-400 mt-2">
+          {data.note} Route measured for {inputAsset?.symbol ?? symbol} into {outputAsset?.symbol ?? "USDT"}.
+        </p>
       )}
     </div>
   );

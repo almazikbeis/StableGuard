@@ -9,6 +9,9 @@ pub struct RebalanceExecuted {
     pub from_index: u8,
     pub to_index: u8,
     pub amount: u64,
+    pub from_balance_after: u64,
+    pub to_balance_after: u64,
+    pub total_rebalances: u64,
     pub timestamp: i64,
 }
 
@@ -25,9 +28,9 @@ pub struct ExecuteRebalance<'info> {
     pub vault: Account<'info, VaultState>,
 }
 
-/// Rebalance shifts the virtual allocation between two registered token slots.
-/// This is an internal accounting update — no cross-mint SPL transfer occurs.
-/// The signer can be either the vault authority or the delegated AI agent.
+/// Executes an AI-initiated rebalance between two registered token slots.
+/// Mutates vault accounting (balances[from] → balances[to]) and increments
+/// total_rebalances. The signer can be the vault authority or the delegated AI agent.
 pub fn handle_rebalance(
     ctx: Context<ExecuteRebalance>,
     from_index: u8,
@@ -56,20 +59,23 @@ pub fn handle_rebalance(
         StableGuardError::InsufficientFunds
     );
 
-    let vault_key = ctx.accounts.vault.key();
     let vault = &mut ctx.accounts.vault;
+    let fi = from_index as usize;
+    let ti = to_index as usize;
 
-    vault.balances[from_index as usize] = vault.balances[from_index as usize]
+    // Mutate vault accounting: move balance from source slot to destination slot.
+    vault.balances[fi] = vault.balances[fi]
         .checked_sub(amount)
         .ok_or(StableGuardError::MathOverflow)?;
-    vault.balances[to_index as usize] = vault.balances[to_index as usize]
+    vault.balances[ti] = vault.balances[ti]
         .checked_add(amount)
         .ok_or(StableGuardError::MathOverflow)?;
-    vault.total_rebalances = vault
-        .total_rebalances
-        .checked_add(1)
-        .ok_or(StableGuardError::MathOverflow)?;
+    vault.total_rebalances = vault.total_rebalances.checked_add(1).unwrap_or(u64::MAX);
 
+    let vault_key = vault.key();
+    let from_bal = vault.balances[fi];
+    let to_bal = vault.balances[ti];
+    let total_rebalances = vault.total_rebalances;
     let timestamp = Clock::get()?.unix_timestamp;
 
     emit!(RebalanceExecuted {
@@ -77,15 +83,20 @@ pub fn handle_rebalance(
         from_index,
         to_index,
         amount,
+        from_balance_after: from_bal,
+        to_balance_after: to_bal,
+        total_rebalances,
         timestamp,
     });
 
     msg!(
-        "Rebalance: from_index={} to_index={} amount={} total_rebalances={}",
+        "RebalanceExecuted: from_index={} to_index={} amount={} from_bal={} to_bal={} total_rebalances={}",
         from_index,
         to_index,
         amount,
-        vault.total_rebalances
+        from_bal,
+        to_bal,
+        total_rebalances,
     );
     Ok(())
 }

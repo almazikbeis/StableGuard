@@ -3,6 +3,7 @@ package yield
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -37,44 +38,77 @@ type marginfiBank struct {
 	UtilRate    float64 `json:"utilization_rate"`
 }
 
+// marginfiEndpoints lists known MarginFi API endpoint variants to try.
+var marginfiEndpoints = []string{
+	marginfiBaseURL + "/v0/banks",
+	"https://marginfi-v2-ui-data.s3.amazonaws.com/banks.json",
+}
+
 func (m *MarginfiAdapter) FetchOpportunities(ctx context.Context) ([]Opportunity, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, marginfiBaseURL+"/v0/banks", nil)
+	// 1. Try DeFiLlama (real, publicly accessible)
+	if opps, err := FetchDefiLlamaPools(ctx, ProtocolMarginfi); err == nil && len(opps) > 0 {
+		log.Printf("[yield/marginfi] DeFiLlama: %d pools (live)", len(opps))
+		return opps, nil
+	}
+	// 2. Try MarginFi's own API
+	for _, endpoint := range marginfiEndpoints {
+		opps, err := m.fetchEndpoint(ctx, endpoint)
+		if err == nil && len(opps) > 0 {
+			return opps, nil
+		}
+		log.Printf("[yield/marginfi] endpoint %s failed: %v", endpoint, err)
+	}
+	log.Printf("[yield/marginfi] all sources failed, using estimates")
+	return m.fallback(), nil
+}
+
+func (m *MarginfiAdapter) fetchEndpoint(ctx context.Context, endpoint string) ([]Opportunity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return m.fallback(), nil
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "StableGuard/1.0")
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		log.Printf("[yield/marginfi] API unreachable, using estimates: %v", err)
-		return m.fallback(), nil
+		return nil, fmt.Errorf("HTTP error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[yield/marginfi] API returned %d, using estimates", resp.StatusCode)
-		return m.fallback(), nil
+		return nil, fmt.Errorf("API returned %d", resp.StatusCode)
 	}
 
 	var banks []marginfiBank
 	if err := json.NewDecoder(resp.Body).Decode(&banks); err != nil {
-		return m.fallback(), nil
+		return nil, fmt.Errorf("decode error: %w", err)
 	}
 
 	now := time.Now().Unix()
 	var opps []Opportunity
 	for _, b := range banks {
 		sym := b.Mint.Symbol
-		if !isStable(sym) {
-			continue
+		if sym == "" {
+			// Some endpoints use a flat symbol field
+			sym = b.Mint.Address
+		}
+		depositRate := b.DepositRate
+		if depositRate > 0 && depositRate < 1 {
+			depositRate *= 100 // convert from decimal to percentage
+		}
+		borrowRate := b.BorrowRate
+		if borrowRate > 0 && borrowRate < 1 {
+			borrowRate *= 100
 		}
 		opps = append(opps, Opportunity{
 			Protocol:    ProtocolMarginfi,
 			DisplayName: "Marginfi",
 			URL:         "https://app.marginfi.com/",
 			Token:       strings.ToUpper(sym),
-			SupplyAPY:   b.DepositRate * 100,
-			BorrowAPY:   b.BorrowRate * 100,
+			AssetType:   AssetTypeFor(strings.ToUpper(sym)),
+			SupplyAPY:   depositRate,
+			BorrowAPY:   borrowRate,
 			TVLMillions: b.TotalAssets / 1_000_000,
 			UtilRate:    b.UtilRate,
 			UpdatedAt:   now,
@@ -83,7 +117,7 @@ func (m *MarginfiAdapter) FetchOpportunities(ctx context.Context) ([]Opportunity
 	}
 
 	if len(opps) == 0 {
-		return m.fallback(), nil
+		return nil, fmt.Errorf("no opportunities found in response")
 	}
 	return opps, nil
 }
@@ -92,17 +126,10 @@ func (m *MarginfiAdapter) FetchOpportunities(ctx context.Context) ([]Opportunity
 func (m *MarginfiAdapter) fallback() []Opportunity {
 	now := time.Now().Unix()
 	return []Opportunity{
-		{
-			Protocol: ProtocolMarginfi, DisplayName: "Marginfi",
-			URL: "https://app.marginfi.com/", Token: "USDC",
-			SupplyAPY: 6.91, BorrowAPY: 11.20, TVLMillions: 185, UtilRate: 0.68,
-			UpdatedAt: now, IsLive: false,
-		},
-		{
-			Protocol: ProtocolMarginfi, DisplayName: "Marginfi",
-			URL: "https://app.marginfi.com/", Token: "USDT",
-			SupplyAPY: 7.34, BorrowAPY: 11.80, TVLMillions: 142, UtilRate: 0.70,
-			UpdatedAt: now, IsLive: false,
-		},
+		{Protocol: ProtocolMarginfi, DisplayName: "Marginfi", URL: "https://app.marginfi.com/", Token: "USDC", AssetType: "stable",   SupplyAPY: 6.91, BorrowAPY: 11.20, TVLMillions: 185, UtilRate: 0.68, UpdatedAt: now, IsLive: false},
+		{Protocol: ProtocolMarginfi, DisplayName: "Marginfi", URL: "https://app.marginfi.com/", Token: "USDT", AssetType: "stable",   SupplyAPY: 7.34, BorrowAPY: 11.80, TVLMillions: 142, UtilRate: 0.70, UpdatedAt: now, IsLive: false},
+		{Protocol: ProtocolMarginfi, DisplayName: "Marginfi", URL: "https://app.marginfi.com/", Token: "SOL",  AssetType: "volatile", SupplyAPY: 5.88, BorrowAPY: 9.10,  TVLMillions: 510, UtilRate: 0.65, UpdatedAt: now, IsLive: false},
+		{Protocol: ProtocolMarginfi, DisplayName: "Marginfi", URL: "https://app.marginfi.com/", Token: "ETH",  AssetType: "volatile", SupplyAPY: 2.71, BorrowAPY: 4.90,  TVLMillions: 98,  UtilRate: 0.58, UpdatedAt: now, IsLive: false},
+		{Protocol: ProtocolMarginfi, DisplayName: "Marginfi", URL: "https://app.marginfi.com/", Token: "BTC",  AssetType: "volatile", SupplyAPY: 1.18, BorrowAPY: 2.85,  TVLMillions: 210, UtilRate: 0.49, UpdatedAt: now, IsLive: false},
 	}
 }

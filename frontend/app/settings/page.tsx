@@ -1,8 +1,25 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { startTransition, useEffect, useState, type ReactNode } from "react";
+import { motion } from "framer-motion";
 import Link from "next/link";
-import { Shield, ArrowLeft, Send, CheckCircle, XCircle, ExternalLink, Bell, Zap, ChevronRight } from "lucide-react";
+import {
+  ArrowLeft,
+  Bell,
+  Bot,
+  CheckCircle,
+  ChevronRight,
+  ExternalLink,
+  KeyRound,
+  Radar,
+  Send,
+  Shield,
+  Sparkles,
+  Wallet,
+  XCircle,
+  Zap,
+} from "lucide-react";
+import { SettingsResponse } from "@/lib/api";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v1";
 
@@ -12,52 +29,324 @@ function authHeaders(): HeadersInit {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+async function fetchJSON<T>(path: string): Promise<T> {
+  const response = await fetch(`${BASE}${path}`, {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`GET ${path} -> ${response.status}`);
+  return response.json();
+}
+
 async function post(path: string, body: unknown) {
-  const r = await fetch(`${BASE}${path}`, {
+  const response = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
-  return r.json();
+  return response.json();
 }
 
-// ── Onboarding steps ───────────────────────────────────────────────────────
-
 const STEPS = [
-  { id: "wallet", label: "Connect Wallet", icon: Shield },
-  { id: "telegram", label: "Telegram Alerts", icon: Bell },
-  { id: "discord", label: "Discord Alerts", icon: Zap },
-  { id: "done", label: "All Set", icon: CheckCircle },
-];
+  { id: "wallet", label: "Wallet Authority", icon: Wallet, blurb: "Confirm treasury signer and authority routing." },
+  { id: "telegram", label: "Telegram Relay", icon: Bell, blurb: "Wire your real-time operator alert stream." },
+  { id: "discord", label: "Discord Relay", icon: Zap, blurb: "Broadcast incidents into your ops war room." },
+  { id: "done", label: "Launch Checks", icon: Sparkles, blurb: "Test the stack and review live runtime status." },
+] as const;
+
+const stepMotion = {
+  hidden: { opacity: 0, y: 18 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.35 } },
+} as const;
+
+type SaveState = "idle" | "saving" | "ok" | "error";
+
+function StatusBadge({
+  ok,
+  label,
+}: {
+  ok: boolean;
+  label: string;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] ${
+        ok
+          ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-200"
+          : "border-amber-300/20 bg-amber-400/10 text-amber-200"
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${ok ? "bg-emerald-300" : "bg-amber-300"}`} />
+      {label}
+    </span>
+  );
+}
+
+function StepRail({
+  step,
+  setStep,
+}: {
+  step: number;
+  setStep: (index: number) => void;
+}) {
+  return (
+    <div className="panel-surface neon-border rounded-[26px] p-4 sm:p-5">
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.22em] text-slate-500">
+        <Radar size={13} className="text-cyan-300" />
+        Setup Sequence
+      </div>
+
+      <div className="mt-4 space-y-3">
+        {STEPS.map((item, index) => {
+          const Icon = item.icon;
+          const active = index === step;
+          const completed = index < step;
+
+          return (
+            <button
+              key={item.id}
+              onClick={() => setStep(index)}
+              className={`group flex w-full items-start gap-3 rounded-[20px] border px-3 py-3 text-left transition-all ${
+                active
+                  ? "border-cyan-300/24 bg-cyan-400/10 shadow-[0_0_0_1px_rgba(79,227,255,0.08)]"
+                  : completed
+                  ? "border-emerald-300/18 bg-emerald-400/8"
+                  : "border-white/8 bg-white/[0.03] hover:bg-white/[0.05]"
+              }`}
+            >
+              <div
+                className={`mt-0.5 flex h-10 w-10 items-center justify-center rounded-2xl border ${
+                  active
+                    ? "border-cyan-300/25 bg-cyan-400/12 text-cyan-200"
+                    : completed
+                    ? "border-emerald-300/25 bg-emerald-400/12 text-emerald-200"
+                    : "border-white/10 bg-white/5 text-slate-300"
+                }`}
+              >
+                {completed ? <CheckCircle size={16} /> : <Icon size={16} />}
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-display text-sm tracking-[0.08em] text-white">{item.label}</p>
+                  <ChevronRight
+                    size={14}
+                    className={`transition-transform ${active ? "text-cyan-200" : "text-slate-500 group-hover:translate-x-0.5"}`}
+                  />
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-slate-400">{item.blurb}</p>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RuntimePanel({
+  wallet,
+  settings,
+}: {
+  wallet: string | null;
+  settings: SettingsResponse | null;
+}) {
+  return (
+    <div className="panel-surface-soft rounded-[26px] p-4 sm:p-5">
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.22em] text-slate-500">
+        <Bot size={13} className="text-orange-300" />
+        Runtime Snapshot
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <div className="data-chip rounded-[18px] px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">AI profile</div>
+          <div className="mt-2 text-sm font-semibold text-white">{settings?.ai_decision_profile ?? "balanced"}</div>
+        </div>
+        <div className="data-chip rounded-[18px] px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Approval mode</div>
+          <div className="mt-2 text-sm font-semibold text-white">{settings?.execution_approval_mode ?? "manual"}</div>
+        </div>
+        <div className="data-chip rounded-[18px] px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Execution lane</div>
+          <div className="mt-2 text-sm font-semibold text-white">{settings?.execution_mode ?? "record_only"}</div>
+        </div>
+        <div className="data-chip rounded-[18px] px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Yield status</div>
+          <div className="mt-2 text-sm font-semibold text-white">{settings?.yield_live_mode ?? "disabled"}</div>
+        </div>
+        <div className="data-chip rounded-[18px] px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Growth mode</div>
+          <div className="mt-2 text-sm font-semibold text-white">{settings?.growth_sleeve_mode ?? "disabled"}</div>
+        </div>
+        <div className="data-chip rounded-[18px] px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Growth budget</div>
+          <div className="mt-2 text-sm font-semibold text-white">{settings?.growth_sleeve_budget_pct ?? 0}%</div>
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-2">
+        <StatusBadge ok={Boolean(wallet)} label={wallet ? "wallet authority online" : "wallet unavailable"} />
+        <StatusBadge ok={Boolean(settings?.execution_ready_for_staging)} label="custody staging" />
+        <StatusBadge ok={Boolean(settings?.execution_ready_for_auto_swap)} label="auto swap path" />
+        <StatusBadge ok={Boolean(settings?.growth_sleeve_ready_for_live)} label="growth sleeve live" />
+      </div>
+
+      {settings?.mode_readiness && (
+        <div className="mt-4 rounded-[18px] border border-white/8 bg-white/[0.03] p-4">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Mode Readiness</div>
+          <div className="mt-3 space-y-3">
+            {(["MANUAL", "GUARDED", "BALANCED", "YIELD_MAX"] as const).map((mode) => {
+              const item = settings.mode_readiness?.[mode];
+              if (!item) return null;
+              const riskTone =
+                item.risk === "high"
+                  ? "text-rose-200 border-rose-300/20 bg-rose-400/8"
+                  : item.risk === "medium"
+                  ? "text-amber-200 border-amber-300/20 bg-amber-400/8"
+                  : "text-emerald-200 border-emerald-300/20 bg-emerald-400/8";
+
+              return (
+                <div key={mode} className="rounded-[16px] border border-white/8 bg-[#08101c] px-3 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="font-display text-sm tracking-[0.08em] text-white">{mode}</span>
+                      <span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] ${riskTone}`}>
+                        {item.risk} risk
+                      </span>
+                    </div>
+                    <StatusBadge ok={item.ready} label={item.ready ? "launch ready" : "blocked"} />
+                  </div>
+                  <p className="mt-2 text-sm leading-relaxed text-slate-300">{item.summary}</p>
+                  {item.blockers.length > 0 && (
+                    <div className="mt-2 text-xs leading-relaxed text-amber-200/85">
+                      Blockers: {item.blockers.join(" ")}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {settings?.growth_sleeve_note && (
+        <div className="mt-4 rounded-[18px] border border-cyan-300/14 bg-cyan-400/8 px-4 py-3 text-sm leading-relaxed text-cyan-100/85">
+          {settings.growth_sleeve_note}
+        </div>
+      )}
+
+      {wallet ? (
+        <div className="mt-4 rounded-[18px] border border-emerald-300/18 bg-emerald-400/8 px-4 py-3">
+          <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-emerald-200">
+            <CheckCircle size={13} />
+            Wallet Authority
+          </div>
+          <p className="mt-2 break-all font-mono-data text-xs text-emerald-100/90">{wallet}</p>
+        </div>
+      ) : (
+        <div className="mt-4 rounded-[18px] border border-rose-300/18 bg-rose-400/8 px-4 py-3 text-sm text-rose-100/85">
+          Could not load backend wallet authority. Check whether the backend is running and authenticated.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MessageBanner({
+  state,
+  message,
+}: {
+  state: SaveState;
+  message: string;
+}) {
+  if (!message) return null;
+  const ok = state === "ok";
+
+  return (
+    <div
+      className={`flex items-center gap-2 rounded-[18px] border px-3 py-3 text-sm ${
+        ok
+          ? "border-emerald-300/18 bg-emerald-400/8 text-emerald-100"
+          : "border-rose-300/18 bg-rose-400/8 text-rose-100"
+      }`}
+    >
+      {ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
+      {message}
+    </div>
+  );
+}
+
+function ActionButton({
+  children,
+  disabled,
+  onClick,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="inline-flex items-center justify-center rounded-2xl border border-orange-300/20 bg-orange-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_16px_40px_rgba(255,122,26,0.25)] transition-all hover:bg-orange-400 disabled:opacity-40"
+    >
+      {children}
+    </button>
+  );
+}
 
 export default function SettingsPage() {
   const [step, setStep] = useState(0);
+  const [settings, setSettings] = useState<SettingsResponse | null>(null);
+  const [wallet, setWallet] = useState<string | null>(null);
 
-  // Telegram
   const [tgToken, setTgToken] = useState("");
   const [tgChatID, setTgChatID] = useState("");
-  const [tgStatus, setTgStatus] = useState<"idle" | "saving" | "ok" | "error">("idle");
+  const [tgStatus, setTgStatus] = useState<SaveState>("idle");
   const [tgMsg, setTgMsg] = useState("");
 
-  // Discord
   const [dcWebhook, setDcWebhook] = useState("");
-  const [dcStatus, setDcStatus] = useState<"idle" | "saving" | "ok" | "error">("idle");
+  const [dcStatus, setDcStatus] = useState<SaveState>("idle");
   const [dcMsg, setDcMsg] = useState("");
 
-  // Test alert
-  const [testStatus, setTestStatus] = useState<"idle" | "sending" | "ok" | "error">("idle");
+  const [testStatus, setTestStatus] = useState<SaveState>("idle");
   const [testMsg, setTestMsg] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadRuntime() {
+      const [settingsResult, vaultResult] = await Promise.allSettled([
+        fetchJSON<SettingsResponse>("/settings"),
+        fetchJSON<{ authority: string }>("/vault"),
+      ]);
+
+      if (cancelled) return;
+
+      startTransition(() => {
+        if (settingsResult.status === "fulfilled") setSettings(settingsResult.value);
+        if (vaultResult.status === "fulfilled") setWallet(vaultResult.value.authority);
+      });
+    }
+
+    void loadRuntime();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function saveTelegram() {
     if (!tgToken || !tgChatID) return;
     setTgStatus("saving");
     try {
-      const r = await post("/settings/telegram", { bot_token: tgToken, chat_id: tgChatID });
-      setTgStatus(r.ok ? "ok" : "error");
-      setTgMsg(r.message ?? r.error ?? "");
+      const result = await post("/settings/telegram", { bot_token: tgToken, chat_id: tgChatID });
+      setTgStatus(result.ok ? "ok" : "error");
+      setTgMsg(result.message ?? result.error ?? "");
     } catch {
       setTgStatus("error");
-      setTgMsg("Request failed");
+      setTgMsg("Telegram relay request failed");
     }
   }
 
@@ -65,349 +354,410 @@ export default function SettingsPage() {
     if (!dcWebhook) return;
     setDcStatus("saving");
     try {
-      const r = await post("/settings/discord", { webhook_url: dcWebhook });
-      setDcStatus(r.ok ? "ok" : "error");
-      setDcMsg(r.message ?? r.error ?? "");
+      const result = await post("/settings/discord", { webhook_url: dcWebhook });
+      setDcStatus(result.ok ? "ok" : "error");
+      setDcMsg(result.message ?? result.error ?? "");
     } catch {
       setDcStatus("error");
-      setDcMsg("Request failed");
+      setDcMsg("Discord relay request failed");
     }
   }
 
   async function sendTestAlert() {
-    setTestStatus("sending");
+    setTestStatus("saving");
     try {
-      const r = await post("/settings/test-alert", {});
-      setTestStatus(r.ok ? "ok" : "error");
-      setTestMsg(r.message ?? r.error ?? "");
+      const result = await post("/settings/test-alert", {});
+      setTestStatus(result.ok ? "ok" : "error");
+      setTestMsg(result.message ?? result.error ?? "");
     } catch {
       setTestStatus("error");
-      setTestMsg("Request failed");
+      setTestMsg("Test alert request failed");
     }
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
-        <div className="max-w-3xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
-          <Link href="/" className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
-            <ArrowLeft size={16} />
-          </Link>
-          <div className="w-6 h-6 rounded-md bg-orange-500 flex items-center justify-center">
-            <Shield size={12} className="text-white" />
+    <div className="min-h-screen relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+        <div className="absolute -top-32 left-[8%] h-72 w-72 rounded-full bg-cyan-400/10 blur-[110px]" />
+        <div className="absolute top-24 right-[4%] h-[26rem] w-[26rem] rounded-full bg-orange-500/12 blur-[120px]" />
+        <div className="absolute inset-x-0 top-0 h-[30rem] opacity-40 animate-grid-drift bg-[linear-gradient(transparent_96%,rgba(255,255,255,0.05)_100%),linear-gradient(90deg,transparent_96%,rgba(255,255,255,0.05)_100%)] bg-[size:52px_52px]" />
+      </div>
+
+      <header className="sticky top-0 z-50 border-b border-white/8 bg-[#08111f]/80 backdrop-blur-xl">
+        <div className="max-w-7xl mx-auto flex h-[72px] items-center justify-between gap-4 px-4 sm:px-6">
+          <div className="flex items-center gap-3">
+            <Link
+              href="/dashboard"
+              className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] text-slate-300 transition-colors hover:bg-white/[0.08] hover:text-white"
+            >
+              <ArrowLeft size={16} />
+            </Link>
+            <div className="flex items-center gap-3">
+              <div className="relative flex h-10 w-10 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#ff7a1a,#ffb347)] shadow-[0_0_24px_rgba(255,122,26,0.35)]">
+                <Shield size={15} className="text-white" />
+              </div>
+              <div>
+                <p className="font-display text-sm tracking-[0.12em] text-white uppercase">Control Settings</p>
+                <p className="text-xs text-slate-400">Operator relay setup, execution truth, and runtime health</p>
+              </div>
+            </div>
           </div>
-          <span className="font-semibold text-gray-900 text-sm">Settings</span>
+
+          <div className="hidden md:flex items-center gap-2">
+            <StatusBadge ok={Boolean(settings?.pipeline_running)} label="pipeline online" />
+            <StatusBadge ok={Boolean(settings?.execution_ready_for_staging)} label="execution staging" />
+          </div>
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-
-        {/* Progress steps */}
-        <div className="flex items-center gap-2">
-          {STEPS.map((s, i) => (
-            <div key={s.id} className="flex items-center gap-2">
-              <button
-                onClick={() => setStep(i)}
-                className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full transition-colors ${
-                  step === i
-                    ? "bg-gray-900 text-white"
-                    : i < step
-                    ? "bg-green-100 text-green-700"
-                    : "bg-gray-100 text-gray-500"
-                }`}
-              >
-                {i < step ? <CheckCircle size={11} /> : <s.icon size={11} />}
-                <span className="hidden sm:inline">{s.label}</span>
-              </button>
-              {i < STEPS.length - 1 && <ChevronRight size={12} className="text-gray-300 flex-shrink-0" />}
-            </div>
-          ))}
-        </div>
-
-        {/* Step 0: Wallet */}
-        {step === 0 && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="px-6 py-5 border-b border-gray-100">
-              <h2 className="font-semibold text-gray-900">Connect Your Wallet</h2>
-              <p className="text-sm text-gray-500 mt-1">The backend manages the vault with a server-side keypair.</p>
-            </div>
-            <div className="p-6 space-y-4">
-              <WalletInfo />
-              <div className="bg-blue-50 rounded-lg p-4 text-sm text-blue-700">
-                <p className="font-medium mb-1">How it works</p>
-                <p className="text-blue-600 leading-relaxed">
-                  StableGuard uses a dedicated server wallet to execute on-chain transactions.
-                  Your wallet address is configured via <code className="bg-blue-100 px-1 rounded">WALLET_KEY_PATH</code> in the backend <code className="bg-blue-100 px-1 rounded">.env</code> file.
-                  The AI agents monitor prices and rebalance automatically based on your strategy settings.
-                </p>
+      <main className="app-shell relative mx-auto max-w-7xl px-4 py-6 sm:px-6">
+        <motion.section
+          initial={{ opacity: 0, y: 18 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35 }}
+          className="hero-stage panel-surface neon-border rounded-[30px] px-5 py-6 sm:px-7"
+        >
+          <div className="grid gap-6 xl:grid-cols-[1.3fr_0.9fr] xl:items-start">
+            <div>
+              <div className="status-ribbon">
+                <span className="data-chip rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-cyan-200">Web3 Ops</span>
+                <span className="data-chip rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-orange-200">Relay Setup</span>
+                <span className="data-chip rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-violet-200">
+                  {settings?.ai_agent_model ?? "claude-haiku-4-5"}
+                </span>
+                <span className="status-node rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-emerald-100">
+                  {settings?.settings_persisted ? "Runtime Persisted" : "Runtime Volatile"}
+                </span>
               </div>
-              <button
-                onClick={() => setStep(1)}
-                className="w-full py-2.5 bg-gray-900 text-white rounded-lg text-sm font-medium hover:bg-gray-800 transition-colors"
-              >
-                Continue to Alerts setup
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Step 1: Telegram */}
-        {step === 1 && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="px-6 py-5 border-b border-gray-100">
-              <h2 className="font-semibold text-gray-900">Telegram Alerts</h2>
-              <p className="text-sm text-gray-500 mt-1">
-                Get notified when risk spikes or a depeg is detected.
+              <h1 className="mt-4 max-w-3xl font-display text-3xl leading-[0.98] tracking-[-0.04em] text-white sm:text-4xl lg:text-5xl">
+                Configure the operator layer like a Solana mission console, not a generic settings page.
+              </h1>
+              <p className="mt-4 max-w-2xl text-sm leading-relaxed text-slate-300 sm:text-base">
+                This screen should tell the truth about custody, AI runtime, alert relays, and operator readiness. Wire the channels, verify the authority, then test the stack.
               </p>
+              <div className="mt-5 status-ribbon">
+                <span className="status-node rounded-full px-3 py-1.5 text-[11px] uppercase tracking-[0.18em] text-slate-100">
+                  Updated {settings?.settings_updated_at ? new Date(settings.settings_updated_at).toLocaleString() : "not yet persisted"}
+                </span>
+                <span className="status-node rounded-full px-3 py-1.5 text-[11px] uppercase tracking-[0.18em] text-violet-100">
+                  Growth {settings?.growth_sleeve_mode ?? "disabled"}
+                </span>
+              </div>
             </div>
-            <div className="p-6 space-y-5">
 
-              {/* Setup guide */}
-              <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-600 space-y-2">
-                <p className="font-medium text-gray-800">Setup guide</p>
-                <ol className="list-decimal list-inside space-y-1.5 text-gray-600">
-                  <li>
-                    Open Telegram and message{" "}
-                    <a href="https://t.me/BotFather" target="_blank" rel="noreferrer"
-                       className="text-blue-600 hover:underline inline-flex items-center gap-0.5">
-                      @BotFather <ExternalLink size={11} />
-                    </a>
-                  </li>
-                  <li>Send <code className="bg-gray-200 px-1 rounded">/newbot</code> and follow the steps to create your bot</li>
-                  <li>Copy the <strong>Bot Token</strong> you receive</li>
-                  <li>
-                    Start your bot, then message{" "}
-                    <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer"
-                       className="text-blue-600 hover:underline inline-flex items-center gap-0.5">
-                      @userinfobot <ExternalLink size={11} />
-                    </a>{" "}
-                    to get your <strong>Chat ID</strong>
-                  </li>
-                </ol>
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1.5">Bot Token</label>
-                  <input
-                    type="text"
-                    placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
-                    value={tgToken}
-                    onChange={(e) => setTgToken(e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/30 focus:border-orange-400"
-                  />
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-2">
+              {[
+                { label: "Control mode", value: settings?.control_mode ?? "UNKNOWN" },
+                { label: "AI profile", value: settings?.ai_decision_profile ?? "balanced" },
+                { label: "Approval", value: settings?.execution_approval_mode ?? "manual" },
+                { label: "Yield", value: settings?.yield_live_mode ?? "disabled" },
+                { label: "Growth", value: settings?.growth_sleeve_mode ?? "disabled" },
+                { label: "Growth budget", value: `${settings?.growth_sleeve_budget_pct ?? 0}%` },
+              ].map((item) => (
+                <div key={item.label} className="data-chip rounded-[18px] px-4 py-3">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{item.label}</div>
+                  <div className="mt-2 text-sm font-semibold text-white">{item.value}</div>
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1.5">Chat ID</label>
-                  <input
-                    type="text"
-                    placeholder="123456789"
-                    value={tgChatID}
-                    onChange={(e) => setTgChatID(e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/30 focus:border-orange-400"
-                  />
-                </div>
-              </div>
-
-              {tgMsg && (
-                <div className={`flex items-center gap-2 text-sm rounded-lg px-3 py-2 ${
-                  tgStatus === "ok" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
-                }`}>
-                  {tgStatus === "ok" ? <CheckCircle size={14} /> : <XCircle size={14} />}
-                  {tgMsg}
-                </div>
-              )}
-
-              <div className="flex gap-2">
-                <button
-                  onClick={saveTelegram}
-                  disabled={!tgToken || !tgChatID || tgStatus === "saving"}
-                  className="flex-1 py-2.5 bg-gray-900 text-white rounded-lg text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40"
-                >
-                  {tgStatus === "saving" ? "Saving…" : "Save Telegram"}
-                </button>
-                <button
-                  onClick={() => setStep(2)}
-                  className="px-4 py-2.5 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors"
-                >
-                  Skip
-                </button>
-              </div>
+              ))}
             </div>
           </div>
-        )}
+        </motion.section>
 
-        {/* Step 2: Discord */}
-        {step === 2 && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="px-6 py-5 border-b border-gray-100">
-              <h2 className="font-semibold text-gray-900">Discord Alerts</h2>
-              <p className="text-sm text-gray-500 mt-1">Post risk alerts to your Discord channel.</p>
-            </div>
-            <div className="p-6 space-y-5">
-
-              <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-600 space-y-2">
-                <p className="font-medium text-gray-800">Setup guide</p>
-                <ol className="list-decimal list-inside space-y-1.5">
-                  <li>Go to your Discord server → channel settings</li>
-                  <li>Integrations → Webhooks → New Webhook</li>
-                  <li>Copy the Webhook URL</li>
-                </ol>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1.5">Discord Webhook URL</label>
-                <input
-                  type="text"
-                  placeholder="https://discord.com/api/webhooks/..."
-                  value={dcWebhook}
-                  onChange={(e) => setDcWebhook(e.target.value)}
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/30 focus:border-orange-400"
-                />
-              </div>
-
-              {dcMsg && (
-                <div className={`flex items-center gap-2 text-sm rounded-lg px-3 py-2 ${
-                  dcStatus === "ok" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
-                }`}>
-                  {dcStatus === "ok" ? <CheckCircle size={14} /> : <XCircle size={14} />}
-                  {dcMsg}
-                </div>
-              )}
-
-              <div className="flex gap-2">
-                <button
-                  onClick={saveDiscord}
-                  disabled={!dcWebhook || dcStatus === "saving"}
-                  className="flex-1 py-2.5 bg-gray-900 text-white rounded-lg text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40"
-                >
-                  {dcStatus === "saving" ? "Saving…" : "Save Discord"}
-                </button>
-                <button
-                  onClick={() => setStep(3)}
-                  className="px-4 py-2.5 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors"
-                >
-                  Skip
-                </button>
-              </div>
-            </div>
+        <div className="mt-6 grid gap-6 lg:grid-cols-[290px_1fr]">
+          <div className="space-y-4">
+            <StepRail step={step} setStep={setStep} />
+            <RuntimePanel wallet={wallet} settings={settings} />
           </div>
-        )}
 
-        {/* Step 3: Done + test */}
-        {step === 3 && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="px-6 py-5 border-b border-gray-100">
-              <h2 className="font-semibold text-gray-900">All Set!</h2>
-              <p className="text-sm text-gray-500 mt-1">Your StableGuard is configured and monitoring.</p>
-            </div>
-            <div className="p-6 space-y-5">
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {[
-                  { label: "Real-time monitoring", desc: "USDC, USDT, DAI, PYUSD" },
-                  { label: "AI risk analysis", desc: "Every 30s or on risk jump" },
-                  { label: "Circuit breaker", desc: "Auto-pause on depeg > 1.5%" },
-                ].map((f) => (
-                  <div key={f.label} className="bg-green-50 rounded-lg p-3 border border-green-100">
-                    <div className="flex items-center gap-1.5 text-green-700 text-xs font-medium mb-1">
-                      <CheckCircle size={12} />
-                      {f.label}
-                    </div>
-                    <p className="text-xs text-green-600">{f.desc}</p>
-                  </div>
-                ))}
-              </div>
-
-              {/* Test alert */}
-              <div className="border border-gray-200 rounded-lg p-4">
-                <p className="text-sm font-medium text-gray-800 mb-1">Test your alerts</p>
-                <p className="text-xs text-gray-500 mb-3">
-                  Send a test notification to verify Telegram/Discord is configured correctly.
-                </p>
-                <button
-                  onClick={sendTestAlert}
-                  disabled={testStatus === "sending"}
-                  className="flex items-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 transition-colors disabled:opacity-40"
-                >
-                  <Send size={13} />
-                  {testStatus === "sending" ? "Sending…" : "Send Test Alert"}
-                </button>
-                {testMsg && (
-                  <div className={`flex items-center gap-2 text-sm mt-2 ${
-                    testStatus === "ok" ? "text-green-600" : "text-red-600"
-                  }`}>
-                    {testStatus === "ok" ? <CheckCircle size={13} /> : <XCircle size={13} />}
-                    {testMsg}
-                  </div>
-                )}
-              </div>
-
-              {/* Alert thresholds info */}
-              <div className="bg-gray-50 rounded-lg p-4 text-xs text-gray-600 space-y-2">
-                <p className="font-medium text-gray-800 text-sm">Circuit Breaker thresholds</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {[
-                    { label: "Depeg warning alert", value: "> 0.5%" },
-                    { label: "Vault auto-pause", value: "> 1.5%" },
-                    { label: "Emergency alert", value: "> 3.0%" },
-                    { label: "Risk alert", value: "level > 80" },
-                  ].map((t) => (
-                    <div key={t.label} className="flex justify-between bg-white rounded p-2 border border-gray-100">
-                      <span>{t.label}</span>
-                      <span className="font-mono font-medium text-gray-800">{t.value}</span>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-gray-400">Configure in backend <code className="bg-gray-200 px-1 rounded">.env</code> via CIRCUIT_BREAKER_* vars</p>
-              </div>
-
-              <Link
-                href="/"
-                className="flex items-center justify-center gap-2 w-full py-2.5 bg-gray-900 text-white rounded-lg text-sm font-medium hover:bg-gray-800 transition-colors"
+          <div className="space-y-4">
+            {step === 0 && (
+              <motion.section
+                variants={stepMotion}
+                initial="hidden"
+                animate="show"
+                className="panel-surface neon-border rounded-[28px] p-5 sm:p-6"
               >
-                Go to Dashboard
-              </Link>
-            </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-400/10 text-cyan-200">
+                    <Wallet size={18} />
+                  </div>
+                  <div>
+                    <h2 className="font-display text-xl tracking-[0.08em] text-white uppercase">Wallet Authority</h2>
+                    <p className="text-sm text-slate-400">Verify who is actually signing treasury actions.</p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4">
+                    <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                      <KeyRound size={13} className="text-orange-300" />
+                      Current signer
+                    </div>
+                    {wallet ? (
+                      <>
+                        <p className="mt-3 break-all rounded-[18px] border border-emerald-300/16 bg-emerald-400/8 px-4 py-4 font-mono-data text-xs text-emerald-100/90">
+                          {wallet}
+                        </p>
+                        <a
+                          href={`https://explorer.solana.com/address/${wallet}?cluster=devnet`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-3 inline-flex items-center gap-1.5 text-xs text-cyan-200 hover:text-cyan-100"
+                        >
+                          View signer on explorer <ExternalLink size={12} />
+                        </a>
+                      </>
+                    ) : (
+                      <div className="mt-3 rounded-[18px] border border-rose-300/18 bg-rose-400/8 px-4 py-4 text-sm text-rose-100/85">
+                        Could not load backend authority wallet. Confirm the backend is online and authenticated.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">What this means</div>
+                    <ul className="mt-3 space-y-3 text-sm leading-relaxed text-slate-300">
+                      <li>StableGuard executes treasury actions from the backend authority, not from this browser session.</li>
+                      <li>Execution custody and policy approval sit on top of that authority model.</li>
+                      <li>Before enabling more autonomy, confirm that this signer and your runtime config are the ones you expect.</li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="mt-5 flex flex-wrap gap-3">
+                  <ActionButton onClick={() => setStep(1)}>Continue to Telegram Relay</ActionButton>
+                  <Link
+                    href="/dashboard"
+                    className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition-colors hover:bg-white/[0.08] hover:text-white"
+                  >
+                    Back to dashboard
+                  </Link>
+                </div>
+              </motion.section>
+            )}
+
+            {step === 1 && (
+              <motion.section
+                variants={stepMotion}
+                initial="hidden"
+                animate="show"
+                className="panel-surface neon-border rounded-[28px] p-5 sm:p-6"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-400/10 text-cyan-200">
+                    <Bell size={18} />
+                  </div>
+                  <div>
+                    <h2 className="font-display text-xl tracking-[0.08em] text-white uppercase">Telegram Relay</h2>
+                    <p className="text-sm text-slate-400">Route treasury risk warnings, reserve instability alerts, and operator actions into your primary feed.</p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-4 lg:grid-cols-[1fr_0.9fr]">
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4">
+                    <div className="space-y-4">
+                      <div>
+                        <label className="mb-2 block text-[11px] uppercase tracking-[0.18em] text-slate-500">Bot token</label>
+                        <input
+                          type="text"
+                          placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
+                          value={tgToken}
+                          onChange={(event) => setTgToken(event.target.value)}
+                          className="w-full rounded-2xl border border-white/10 bg-[#06101d] px-4 py-3 text-sm text-white outline-none transition-colors placeholder:text-slate-500 focus:border-cyan-300/30"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-2 block text-[11px] uppercase tracking-[0.18em] text-slate-500">Chat ID</label>
+                        <input
+                          type="text"
+                          placeholder="123456789"
+                          value={tgChatID}
+                          onChange={(event) => setTgChatID(event.target.value)}
+                          className="w-full rounded-2xl border border-white/10 bg-[#06101d] px-4 py-3 text-sm text-white outline-none transition-colors placeholder:text-slate-500 focus:border-cyan-300/30"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <MessageBanner state={tgStatus} message={tgMsg} />
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      <ActionButton onClick={saveTelegram} disabled={!tgToken || !tgChatID || tgStatus === "saving"}>
+                        {tgStatus === "saving" ? "Saving relay…" : "Save Telegram"}
+                      </ActionButton>
+                      <button
+                        onClick={() => setStep(2)}
+                        className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition-colors hover:bg-white/[0.08] hover:text-white"
+                      >
+                        Skip for now
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Relay setup guide</div>
+                    <ol className="mt-3 space-y-3 text-sm leading-relaxed text-slate-300">
+                      <li>
+                        Create a bot with{" "}
+                        <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-cyan-200 hover:text-cyan-100">
+                          @BotFather
+                        </a>
+                        .
+                      </li>
+                      <li>Start the bot and send a message from the Telegram account that should receive treasury alerts.</li>
+                      <li>
+                        Retrieve the chat ID from{" "}
+                        <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" className="text-cyan-200 hover:text-cyan-100">
+                          @userinfobot
+                        </a>
+                        .
+                      </li>
+                    </ol>
+                  </div>
+                </div>
+              </motion.section>
+            )}
+
+            {step === 2 && (
+              <motion.section
+                variants={stepMotion}
+                initial="hidden"
+                animate="show"
+                className="panel-surface neon-border rounded-[28px] p-5 sm:p-6"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-orange-300/20 bg-orange-400/10 text-orange-200">
+                    <Zap size={18} />
+                  </div>
+                  <div>
+                    <h2 className="font-display text-xl tracking-[0.08em] text-white uppercase">Discord Relay</h2>
+                    <p className="text-sm text-slate-400">Mirror critical events into your ops channel and incident room.</p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-4 lg:grid-cols-[1fr_0.9fr]">
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4">
+                    <label className="mb-2 block text-[11px] uppercase tracking-[0.18em] text-slate-500">Discord webhook URL</label>
+                    <input
+                      type="text"
+                      placeholder="https://discord.com/api/webhooks/..."
+                      value={dcWebhook}
+                      onChange={(event) => setDcWebhook(event.target.value)}
+                      className="w-full rounded-2xl border border-white/10 bg-[#06101d] px-4 py-3 text-sm text-white outline-none transition-colors placeholder:text-slate-500 focus:border-orange-300/30"
+                    />
+
+                    <div className="mt-4">
+                      <MessageBanner state={dcStatus} message={dcMsg} />
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      <ActionButton onClick={saveDiscord} disabled={!dcWebhook || dcStatus === "saving"}>
+                        {dcStatus === "saving" ? "Saving relay…" : "Save Discord"}
+                      </ActionButton>
+                      <button
+                        onClick={() => setStep(3)}
+                        className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition-colors hover:bg-white/[0.08] hover:text-white"
+                      >
+                        Skip for now
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Webhook setup guide</div>
+                    <ol className="mt-3 space-y-3 text-sm leading-relaxed text-slate-300">
+                      <li>Create a dedicated treasury-alerts channel in your Discord server.</li>
+                      <li>Open channel settings, go to Integrations, then create a new webhook.</li>
+                      <li>Paste that URL here so StableGuard can push operator alerts and incident notices.</li>
+                    </ol>
+                  </div>
+                </div>
+              </motion.section>
+            )}
+
+            {step === 3 && (
+              <motion.section
+                variants={stepMotion}
+                initial="hidden"
+                animate="show"
+                className="panel-surface neon-border rounded-[28px] p-5 sm:p-6"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-400/10 text-emerald-200">
+                    <Sparkles size={18} />
+                  </div>
+                  <div>
+                    <h2 className="font-display text-xl tracking-[0.08em] text-white uppercase">Launch Checks</h2>
+                    <p className="text-sm text-slate-400">Test the alert path and review the runtime envelope before going back to the dashboard.</p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+                  <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      {[
+                        { label: "Monitoring", desc: "Pyth price streams and live vault state." },
+                        { label: "AI runtime", desc: `Profile ${settings?.ai_decision_profile ?? "balanced"} on ${settings?.ai_agent_model ?? "claude-haiku-4-5"}.` },
+                        { label: "Execution", desc: settings?.execution_note ?? "Execution path status unavailable." },
+                        { label: "Growth sleeve", desc: settings?.growth_sleeve_note ?? "Growth sleeve status unavailable." },
+                      ].map((item) => (
+                        <div key={item.label} className="rounded-[20px] border border-white/8 bg-white/[0.03] p-4">
+                          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{item.label}</div>
+                          <p className="mt-2 text-sm leading-relaxed text-slate-200">{item.desc}</p>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Alert probe</div>
+                          <p className="mt-1 text-sm text-slate-300">Send a test notification through the configured relays.</p>
+                        </div>
+                        <ActionButton onClick={sendTestAlert} disabled={testStatus === "saving"}>
+                          <span className="inline-flex items-center gap-2">
+                            <Send size={14} />
+                            {testStatus === "saving" ? "Sending…" : "Send Test Alert"}
+                          </span>
+                        </ActionButton>
+                      </div>
+
+                      <div className="mt-4">
+                        <MessageBanner state={testStatus} message={testMsg} />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-4">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Operational thresholds</div>
+                    <div className="mt-4 space-y-2">
+                      {[
+                        { label: "Risk alert", value: `${settings?.alert_risk_threshold ?? 80}` },
+                        { label: "Circuit breaker", value: `${settings?.circuit_breaker_pause_pct ?? 1.5}%` },
+                        { label: "Yield entry", value: `${settings?.yield_entry_risk ?? 35}` },
+                        { label: "Yield exit", value: `${settings?.yield_exit_risk ?? 55}` },
+                      ].map((item) => (
+                        <div key={item.label} className="flex items-center justify-between rounded-2xl border border-white/8 bg-[#06101d] px-4 py-3">
+                          <span className="text-sm text-slate-300">{item.label}</span>
+                          <span className="font-mono-data text-sm text-white">{item.value}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <Link
+                      href="/dashboard"
+                      className="mt-5 inline-flex w-full items-center justify-center rounded-2xl border border-cyan-300/18 bg-cyan-400/10 px-4 py-3 text-sm font-semibold text-cyan-100 transition-colors hover:bg-cyan-400/15"
+                    >
+                      Return to Dashboard
+                    </Link>
+                  </div>
+                </div>
+              </motion.section>
+            )}
           </div>
-        )}
-
+        </div>
       </main>
-    </div>
-  );
-}
-
-function WalletInfo() {
-  const [wallet, setWallet] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v1"}/vault`)
-      .then(r => r.json())
-      .then(d => setWallet(d.authority))
-      .catch(() => {});
-  }, []);
-
-  if (!wallet) return (
-    <div className="border border-gray-200 rounded-lg p-4 text-sm text-gray-400">
-      Could not connect to backend wallet — is the server running?
-    </div>
-  );
-
-  return (
-    <div className="border border-green-200 bg-green-50 rounded-lg p-4">
-      <div className="flex items-center gap-2 text-green-700 text-xs font-medium mb-1.5">
-        <CheckCircle size={13} />
-        Wallet Connected
-      </div>
-      <p className="text-xs font-mono text-green-800 break-all">{wallet}</p>
-      <a
-        href={`https://explorer.solana.com/address/${wallet}?cluster=devnet`}
-        target="_blank" rel="noreferrer"
-        className="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800 mt-2"
-      >
-        View on Explorer <ExternalLink size={10} />
-      </a>
     </div>
   );
 }

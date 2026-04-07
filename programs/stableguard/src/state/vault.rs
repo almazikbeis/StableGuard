@@ -12,7 +12,8 @@ pub struct VaultState {
     pub vault_tokens: [Pubkey; 8],
     /// Total tokens deposited across all registered tokens (in smallest unit)
     pub total_deposited: u64,
-    /// Virtual balances per token slot
+    /// Accounted balances per token slot. These change only when real SPL
+    /// transfers enter or leave the vault.
     pub balances: [u64; 8],
     /// Threshold (1–100) at which rebalancing is triggered
     pub rebalance_threshold: u64,

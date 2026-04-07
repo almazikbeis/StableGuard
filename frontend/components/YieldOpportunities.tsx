@@ -11,7 +11,7 @@ const PROTOCOL_COLORS: Record<string, { bg: string; text: string; dot: string }>
   drift:    { bg: "bg-purple-50",  text: "text-purple-600",  dot: "bg-purple-400" },
 };
 
-function APYBar({ value, max }: { value: number; max: number }) {
+function APYBar({ value, max, volatile: isVolatile = false }: { value: number; max: number; volatile?: boolean }) {
   const pct = Math.min(100, (value / max) * 100);
   return (
     <div className="w-24 h-1.5 bg-gray-100 rounded-full overflow-hidden">
@@ -19,7 +19,7 @@ function APYBar({ value, max }: { value: number; max: number }) {
         initial={{ width: 0 }}
         animate={{ width: `${pct}%` }}
         transition={{ duration: 0.6, ease: "easeOut" }}
-        className="h-full bg-green-400 rounded-full"
+        className={`h-full rounded-full ${isVolatile ? "bg-orange-400" : "bg-green-400"}`}
       />
     </div>
   );
@@ -34,6 +34,7 @@ export function YieldOpportunities({ className = "" }: Props) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [hasLive, setHasLive] = useState(false);
+  const [assetFilter, setAssetFilter] = useState<"ALL" | "stable" | "volatile">("ALL");
   const [filter, setFilter] = useState<string>("ALL");
 
   const load = useCallback(async (isRefresh = false) => {
@@ -57,8 +58,11 @@ export function YieldOpportunities({ className = "" }: Props) {
   }, [load]);
 
   const tokens = ["ALL", ...Array.from(new Set(opps.map((o) => o.token)))];
-  const filtered = filter === "ALL" ? opps : opps.filter((o) => o.token === filter);
+  const assetFiltered = assetFilter === "ALL" ? opps : opps.filter((o) => (o.asset_type ?? "stable") === assetFilter);
+  const filtered = filter === "ALL" ? assetFiltered : assetFiltered.filter((o) => o.token === filter);
   const maxAPY = Math.max(...opps.map((o) => o.supply_apy), 1);
+  const stableCount = opps.filter((o) => (o.asset_type ?? "stable") === "stable").length;
+  const volatileCount = opps.filter((o) => o.asset_type === "volatile").length;
 
   return (
     <div className={`bg-white rounded-xl border border-gray-200 ${className}`}>
@@ -95,8 +99,24 @@ export function YieldOpportunities({ className = "" }: Props) {
         </div>
       </div>
 
+      {/* Asset type tabs */}
+      <div className="px-4 pt-2.5 pb-0 flex gap-1.5">
+        {([["ALL", "All", undefined], ["stable", "Stablecoins", stableCount], ["volatile", "Volatile", volatileCount]] as const).map(([val, label, count]) => (
+          <button
+            key={val}
+            onClick={() => { setAssetFilter(val as "ALL" | "stable" | "volatile"); setFilter("ALL"); }}
+            className={`text-xs px-2.5 py-1 rounded-full whitespace-nowrap transition-colors flex items-center gap-1 ${
+              assetFilter === val ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-100"
+            }`}
+          >
+            {label}
+            {count !== undefined && <span className={`text-[9px] rounded-full px-1 ${assetFilter === val ? "bg-white/20" : "bg-gray-100"}`}>{count}</span>}
+          </button>
+        ))}
+      </div>
+
       {/* Token filter tabs */}
-      <div className="px-4 pt-2.5 pb-1 flex gap-1.5 overflow-x-auto">
+      <div className="px-4 pt-1.5 pb-1 flex gap-1.5 overflow-x-auto">
         {tokens.map((t) => (
           <button
             key={t}
@@ -173,10 +193,17 @@ export function YieldOpportunities({ className = "" }: Props) {
                       </a>
                     </div>
 
-                    {/* Token */}
-                    <span className="text-xs font-mono font-semibold text-gray-700 text-right">
-                      {opp.token}
-                    </span>
+                    {/* Token + asset type badge */}
+                    <div className="flex flex-col items-end gap-0.5">
+                      <span className="text-xs font-mono font-semibold text-gray-700">{opp.token}</span>
+                      <span className={`text-[9px] px-1.5 py-0 rounded-full font-medium uppercase tracking-wide ${
+                        (opp.asset_type ?? "stable") === "volatile"
+                          ? "bg-orange-50 text-orange-500"
+                          : "bg-blue-50 text-blue-500"
+                      }`}>
+                        {(opp.asset_type ?? "stable") === "volatile" ? "volatile" : "stable"}
+                      </span>
+                    </div>
 
                     <span
                       className={`text-[10px] font-bold uppercase tracking-wide text-right ${
@@ -188,7 +215,7 @@ export function YieldOpportunities({ className = "" }: Props) {
 
                     {/* APY */}
                     <div className="flex items-center gap-2 justify-end">
-                      <APYBar value={opp.supply_apy} max={maxAPY} />
+                      <APYBar value={opp.supply_apy} max={maxAPY} volatile={opp.asset_type === "volatile"} />
                       <span
                         className={`text-sm font-bold font-mono-data tabular-nums min-w-[46px] text-right ${
                           opp.supply_apy >= 8

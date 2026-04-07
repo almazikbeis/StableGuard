@@ -57,11 +57,15 @@ func (s PriceSnapshot) DeviationBetween(a, b string) float64 {
 	return (diff / avg) * 100
 }
 
-// MaxDeviation returns the maximum pairwise deviation among all monitored tokens.
+// MaxDeviation returns the maximum pairwise deviation among stablecoin tokens only.
+// Volatile assets (BTC/ETH/SOL) are excluded to avoid false circuit-breaker triggers.
 func (s PriceSnapshot) MaxDeviation() float64 {
-	tokens := make([]PriceData, 0, len(s.All))
-	for _, pd := range s.All {
-		tokens = append(tokens, pd)
+	stables := StableFeeds()
+	tokens := make([]PriceData, 0, len(stables))
+	for _, f := range stables {
+		if pd, ok := s.All[f.Symbol]; ok && pd.Price > 0 {
+			tokens = append(tokens, pd)
+		}
 	}
 	max := 0.0
 	for i := 0; i < len(tokens); i++ {

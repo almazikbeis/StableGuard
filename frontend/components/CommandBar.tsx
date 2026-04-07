@@ -42,7 +42,7 @@ export function CommandBar() {
     {
       id: "mode-guarded",
       label: "Switch to GUARDED mode",
-      desc: "AI intervenes only in high-risk or depeg scenarios.",
+      desc: "AI intervenes only during severe reserve instability or high-risk market moves.",
       icon: Shield,
       category: "Control Modes",
       keywords: ["guarded", "safe", "protect", "conservative"],
@@ -153,7 +153,7 @@ export function CommandBar() {
     {
       id: "send",
       label: "Send payment",
-      desc: "Route stablecoins from vault to a recipient",
+      desc: "Route supported treasury assets from the vault to a recipient",
       icon: Send,
       category: "Actions",
       keywords: ["send", "payment", "transfer", "dao"],
@@ -267,7 +267,7 @@ export function CommandBar() {
                   categories.map(cat => (
                     <div key={cat}>
                       <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider px-4 py-1.5">{cat}</p>
-                      {filtered.filter(c => c.category === cat).map((cmd, idx) => {
+                      {filtered.filter(c => c.category === cat).map((cmd) => {
                         const globalIdx = filtered.indexOf(cmd);
                         const Icon = cmd.icon;
                         const isSelected = globalIdx === selected;

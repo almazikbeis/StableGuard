@@ -18,8 +18,8 @@ const dmMono = DM_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "StableGuard — Stablecoin Risk Monitor",
-  description: "Real-time AI-powered stablecoin risk monitoring on Solana",
+  title: "StableGuard — AI Crypto Treasury",
+  description: "AI-managed multi-asset crypto treasury with on-chain execution on Solana",
 };
 
 export default function RootLayout({

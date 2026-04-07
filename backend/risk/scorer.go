@@ -47,8 +47,22 @@ func Compute(snap *pyth.PriceSnapshot, balances []uint64, strategyMode uint8) Sc
 	devPct := snap.Deviation()
 	devBPS := devPct * 100 // convert percentage to bps
 
+	// Volatile asset crash signal: check 24h-equivalent drop via price confidence spread
+	// Use BTC/ETH/SOL confidence as a proxy for short-term volatility.
+	var volatileSignal float64
+	for _, f := range pyth.VolatileFeeds() {
+		if pd, ok := snap.All[f.Symbol]; ok && pd.Price > 0 && pd.Confidence > 0 {
+			// confidence/price ratio * 1000 gives a volatility signal 0–100
+			confRatio := (pd.Confidence / pd.Price) * 1000
+			if confRatio > volatileSignal {
+				volatileSignal = confRatio
+			}
+		}
+	}
+	volatileBoost := math.Min(30, volatileSignal) // max +30 to risk score
+
 	// Base risk score (0–100)
-	baseScore := math.Min(100, (devBPS/MaxRiskDeviation)*100)
+	baseScore := math.Min(100, (devBPS/MaxRiskDeviation)*100+volatileBoost)
 
 	var effectiveScore float64
 	var threshold float64

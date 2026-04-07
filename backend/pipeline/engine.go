@@ -13,7 +13,10 @@ import (
 	"stableguard-backend/ai"
 	"stableguard-backend/alerts"
 	"stableguard-backend/config"
+	"stableguard-backend/execution"
 	"stableguard-backend/hub"
+	"stableguard-backend/jupiter"
+	"stableguard-backend/onchain"
 	"stableguard-backend/policy"
 	"stableguard-backend/pyth"
 	"stableguard-backend/risk"
@@ -31,10 +34,11 @@ type Engine struct {
 	agents   *ai.MultiAgentSystem
 	executor *solanaexec.Executor
 	cfg      *config.Config
-	store    *store.DB         // optional
-	alerter  *alerts.Client    // optional
-	hub      *hub.Hub          // optional — SSE broadcast
-	yieldAgg *yield.Aggregator // optional — yield APY data
+	store    *store.DB           // optional
+	alerter  *alerts.Client      // optional
+	hub      *hub.Hub            // optional — SSE broadcast
+	yieldAgg *yield.Aggregator   // optional — yield APY data
+	whaleAgg *onchain.Aggregator // optional — DexScreener whale signals
 
 	mu                    sync.RWMutex
 	lastDecision          *ai.FinalDecision
@@ -65,10 +69,11 @@ func New(
 	}
 }
 
-func (e *Engine) WithStore(s *store.DB) *Engine           { e.store = s; return e }
-func (e *Engine) WithAlerter(a *alerts.Client) *Engine    { e.alerter = a; return e }
-func (e *Engine) WithHub(h *hub.Hub) *Engine              { e.hub = h; return e }
-func (e *Engine) WithYield(agg *yield.Aggregator) *Engine { e.yieldAgg = agg; return e }
+func (e *Engine) WithStore(s *store.DB) *Engine              { e.store = s; return e }
+func (e *Engine) WithAlerter(a *alerts.Client) *Engine       { e.alerter = a; return e }
+func (e *Engine) WithHub(h *hub.Hub) *Engine                 { e.hub = h; return e }
+func (e *Engine) WithYield(agg *yield.Aggregator) *Engine    { e.yieldAgg = agg; return e }
+func (e *Engine) WithWhales(agg *onchain.Aggregator) *Engine { e.whaleAgg = agg; return e }
 
 // LastState returns the most recent risk score, price snapshot, and AI decision.
 func (e *Engine) LastState() (risk.ScoreV2, *pyth.PriceSnapshot, *ai.FinalDecision) {
@@ -151,9 +156,16 @@ func (e *Engine) Run(ctx context.Context) {
 			}
 
 			// ── Step 4: Circuit Breaker ────────────────────────────────────
+			// Use stablecoin max deviation for depeg detection.
+			// For volatile crash events, elevate maxDev if risk score is critical.
 			maxDev := snap.MaxDeviation()
 			if e.cfg.CircuitBreakerEnabled {
-				e.checkCircuitBreaker(ctx, maxDev, score)
+				effectiveDev := maxDev
+				if score.RiskLevel >= 80 && effectiveDev < e.cfg.CircuitBreakerPausePct {
+					// Crypto crash ≥80 risk overrides depeg threshold
+					effectiveDev = e.cfg.CircuitBreakerPausePct
+				}
+				e.checkCircuitBreaker(ctx, effectiveDev, score)
 			}
 
 			// ── Step 5: Risk alerts ────────────────────────────────────────
@@ -176,8 +188,12 @@ func (e *Engine) Run(ctx context.Context) {
 			lastRiskLevel = score.RiskLevel
 			lastAITime = time.Now()
 
-			// ── Step 8: AI agents ─────────────────────────────────────────
-			decision, err := e.agents.Run(ctx, snap, score, balances, e.cfg.StrategyMode)
+			// ── Step 8: AI agents (with live whale score if available) ────
+			var whaleScore float64
+			if e.whaleAgg != nil {
+				whaleScore = e.whaleAgg.Last().Score
+			}
+			decision, err := e.agents.Run(ctx, snap, score, balances, e.cfg.StrategyMode, whaleScore)
 			if err != nil {
 				log.Printf("[pipeline] AI error: %v", err)
 				continue
@@ -192,7 +208,16 @@ func (e *Engine) Run(ctx context.Context) {
 				decision.Action, decision.FromIndex, decision.ToIndex,
 				decision.SuggestedFraction, decision.Confidence, decision.Rationale)
 
-			// Persist AI decision
+			// Record non-HOLD decisions on-chain and persist with sig
+			var onChainSig string
+			if decision.Action != ai.ActionHold {
+				if sig, err := e.recordDecisionTrace(ctx, decision, score); err != nil {
+					log.Printf("[pipeline] record_decision failed: %v", err)
+				} else {
+					onChainSig = sig
+					log.Printf("[pipeline] record_decision tx: %s", sig)
+				}
+			}
 			if e.store != nil {
 				_ = e.store.SaveDecision(store.DecisionRow{
 					Action:            string(decision.Action),
@@ -204,6 +229,7 @@ func (e *Engine) Run(ctx context.Context) {
 					RiskAnalysis:      decision.RiskAnalysis,
 					YieldAnalysis:     decision.YieldAnalysis,
 					RiskLevel:         score.RiskLevel,
+					ExecSig:           onChainSig,
 				})
 			}
 
@@ -217,9 +243,12 @@ func (e *Engine) Run(ctx context.Context) {
 				)
 			}
 
-			// ── Step 9: Execute on-chain (optional) ───────────────────────
+			// ── Step 9: Execute on-chain ──────────────────────────────────
 			policyEval := policy.Evaluate(e.cfg, decision)
+			// Always attempt the on-chain vault rebalance when AI says act.
+			// This is separate from Jupiter swap which needs mainnet custody.
 			if policyEval.Verdict == policy.VerdictAllowed && e.cfg.AutoExecute && decision.Action != ai.ActionHold {
+				go e.autoRebalanceOnChain(ctx, decision, balances)
 				e.executeDecision(ctx, decision, score, balances)
 			} else {
 				e.mu.Lock()
@@ -240,7 +269,7 @@ func (e *Engine) Run(ctx context.Context) {
 
 			// ── Step 10: Yield optimizer (Variant B — tracked position) ───
 			if e.cfg.YieldEnabled && e.store != nil && e.yieldAgg != nil {
-				e.handleYield(ctx, score, decision)
+				e.handleYield(ctx, score, decision, policyEval)
 			}
 
 			// Re-broadcast with decision included (includes yield position)
@@ -430,14 +459,219 @@ func (e *Engine) executeDecision(ctx context.Context, d *ai.FinalDecision, score
 		return
 	}
 
-	note := "Signal only: market execution is unavailable under the current custody model because vault token accounts are program-owned. Add a dedicated swap/CPI path before enabling real execution."
-	log.Printf("[pipeline] signal only: %d→%d amount=%d | %s", d.FromIndex, d.ToIndex, amount, note)
+	if e.cfg == nil || e.cfg.ExecutionApprovalMode != "auto" {
+		note := "Execution approval mode is manual. AI created an actionable decision, but autonomous Jupiter execution is disabled until EXECUTION_APPROVAL_MODE=auto."
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "approval_required"
+		e.lastExecNote = note
+		e.mu.Unlock()
+		return
+	}
+
+	if e.store == nil {
+		note := "Execution store is unavailable, so autonomous swap lifecycle tracking is disabled."
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "blocked_by_policy"
+		e.lastExecNote = note
+		e.mu.Unlock()
+		return
+	}
+
+	readiness := e.cfg.ExecutionReadiness()
+	if !readiness.ReadyForAutoSwap {
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "signal_only"
+		e.lastExecNote = readiness.Note
+		e.mu.Unlock()
+		return
+	}
+
+	hasActive, err := e.store.HasActiveExecutionJob()
+	if err != nil {
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "failed"
+		e.lastExecNote = "Could not determine whether another execution job is already active."
+		e.mu.Unlock()
+		return
+	}
+	if hasActive {
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "blocked_by_policy"
+		e.lastExecNote = "Another execution job is still active. Autonomous swap execution is serialized and fail-closed."
+		e.mu.Unlock()
+		return
+	}
+
+	if err := e.executeAutonomousSwap(ctx, d, score, amount); err != nil {
+		log.Printf("[pipeline] autonomous execution failed: %v", err)
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "failed"
+		e.lastExecNote = err.Error()
+		e.mu.Unlock()
+	}
+}
+
+func (e *Engine) executeAutonomousSwap(ctx context.Context, d *ai.FinalDecision, score risk.ScoreV2, amount uint64) error {
+	execSvc := execution.New(e.executor, e.cfg, e.store)
+	fromSymbol, ok := tokenSymbolByIndex(uint8(d.FromIndex))
+	if !ok {
+		return fmt.Errorf("execution aborted: source token slot %d is not mapped to an active feed", d.FromIndex)
+	}
+	toSymbol, ok := tokenSymbolByIndex(uint8(d.ToIndex))
+	if !ok {
+		return fmt.Errorf("execution aborted: target token slot %d is not mapped to an active feed", d.ToIndex)
+	}
+
+	sourceCustody := execSvc.CustodyAccount(fromSymbol)
+	targetCustody := execSvc.CustodyAccount(toSymbol)
+	if sourceCustody == "" || targetCustody == "" {
+		return fmt.Errorf("execution aborted: trusted execution custody accounts are missing for %s -> %s", fromSymbol, toSymbol)
+	}
+
+	fundingSig, err := e.executor.SendPayment(ctx, amount, sourceCustody, uint8(d.FromIndex))
+	if err != nil {
+		return fmt.Errorf("execution aborted while staging source funds into custody: %w", err)
+	}
+
+	job := store.ExecutionJobRow{
+		FromIndex:            d.FromIndex,
+		ToIndex:              d.ToIndex,
+		Amount:               amount,
+		Stage:                "custody_staged",
+		FundingSig:           fundingSig,
+		SourceSymbol:         fromSymbol,
+		TargetSymbol:         toSymbol,
+		CustodyAccount:       sourceCustody,
+		TargetCustodyAccount: targetCustody,
+		Note:                 fmt.Sprintf("AI staged %s into trusted execution custody for autonomous swap into %s.", fromSymbol, toSymbol),
+	}
+	jobID, err := e.store.SaveExecutionJob(job)
+	if err != nil {
+		return fmt.Errorf("execution aborted while saving execution job: %w", err)
+	}
+	job.ID = jobID
+
+	sourceFeed, ok := tokenFeedBySymbol(fromSymbol)
+	if !ok {
+		return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d staged, but source token feed mapping is missing", jobID))
+	}
+	targetFeed, ok := tokenFeedBySymbol(toSymbol)
+	if !ok {
+		return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d staged, but target token feed mapping is missing", jobID))
+	}
+
+	// ── Try Jupiter swap; fall back to devnet mock when unavailable ──────
+	var swapSig string
+	var settleAmount uint64
+
+	quote, jupiterErr := jupiter.GetQuote(jupiter.QuoteRequest{
+		InputMint:   sourceFeed.MainnetMint,
+		OutputMint:  targetFeed.MainnetMint,
+		Amount:      amount,
+		SlippageBps: execSvc.SlippageBps(0),
+	})
+
+	if jupiterErr != nil && e.cfg.ExecutionDevnetMode {
+		// Devnet fallback: mint target tokens directly (wallet must be mint authority)
+		targetMint := e.cfg.DevnetMintBySymbol(toSymbol)
+		if targetMint == "" {
+			return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d: Jupiter unavailable, devnet mint not configured for %s", jobID, toSymbol))
+		}
+		mockResult, mockErr := execSvc.DevnetMockSwap(ctx, &job, targetCustody, targetMint)
+		if mockErr != nil {
+			return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d devnet mock swap failed: %v", jobID, mockErr))
+		}
+		swapSig = mockResult.MintSig
+		settleAmount = mockResult.OutAmount
+		log.Printf("[pipeline] devnet mock swap: minted %d %s to custody. sig=%s", settleAmount, toSymbol, swapSig)
+	} else if jupiterErr != nil {
+		return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d failed while fetching a Jupiter quote: %v", jobID, jupiterErr))
+	} else {
+		// Jupiter quote succeeded — build and submit the real swap
+		if err := execSvc.ValidateQuote(quote); err != nil {
+			return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d blocked by quote guardrails: %v", jobID, err))
+		}
+		swapTx, err := jupiter.BuildSwapTransaction(jupiter.SwapRequest{
+			QuoteResponse:           *quote,
+			UserPublicKey:           e.executor.WalletAddress().String(),
+			WrapAndUnwrapSOL:        false,
+			UseSharedAccounts:       true,
+			DynamicComputeUnitLimit: true,
+			AsLegacyTransaction:     false,
+			SourceTokenAccount:      sourceCustody,
+			DestinationTokenAccount: targetCustody,
+			PrioritizationFee:       "auto",
+		})
+		if err != nil {
+			return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d failed while building the Jupiter swap transaction: %v", jobID, err))
+		}
+		job.QuoteOutAmount = quote.OutAmount
+		job.MinOutAmount = quote.OtherAmountThreshold
+		job.PriceImpactPct = quote.PriceImpactPct
+		submission, err := execSvc.SubmitAndReconcile(ctx, &job, targetCustody, swapTx.SwapTransaction, quote.OtherAmountThreshold)
+		if err != nil {
+			return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d failed during autonomous swap lifecycle: %v", jobID, err))
+		}
+		swapSig = submission.SwapSig
+		settleAmount = submission.TargetDelta
+	}
+
 	e.mu.Lock()
-	e.lastExecSig = ""
-	e.lastExecStatus = "signal_only"
-	e.lastExecNote = note
+	e.lastExecSig = swapSig
+	e.lastExecStatus = "executed"
+	e.lastExecNote = fmt.Sprintf("AI confirmed and reconciled autonomous execution for %s -> %s.", fromSymbol, toSymbol)
 	e.mu.Unlock()
 
+	if !e.cfg.ExecutionAutoSettle {
+		return nil
+	}
+	settlementSig, err := e.executor.SendDeposit(ctx, settleAmount, targetCustody, uint8(d.ToIndex))
+	if err != nil {
+		return e.failExecutionJob(jobID, fmt.Sprintf("execution job %d could not settle target custody funds back into treasury: %v", jobID, err))
+	}
+
+	jobRow, err := e.store.ExecutionJobByID(jobID)
+	if err != nil {
+		return fmt.Errorf("execution job %d settled, but could not be reloaded for persistence: %w", jobID, err)
+	}
+	jobRow.Stage = "settled_back_to_treasury"
+	jobRow.SettlementSig = settlementSig
+	jobRow.SettledAmount = settleAmount
+	jobRow.Note = fmt.Sprintf("AI completed autonomous execution and settled %s back into treasury.", toSymbol)
+	if err := e.store.UpdateExecutionJob(*jobRow); err != nil {
+		return fmt.Errorf("execution job %d settled, but persistence update failed: %w", jobID, err)
+	}
+	if err := e.store.SaveRebalance(d.FromIndex, d.ToIndex, settleAmount, settlementSig, score.RiskLevel); err != nil {
+		log.Printf("[pipeline] save rebalance after settlement failed: %v", err)
+	}
+
+	e.mu.Lock()
+	e.lastExecSig = settlementSig
+	e.lastExecStatus = "executed"
+	e.lastExecNote = fmt.Sprintf("AI completed autonomous execution for %s -> %s and settled the output back into treasury.", fromSymbol, toSymbol)
+	e.mu.Unlock()
+	if e.alerter != nil {
+		e.alerter.Send("execution_settled", alerts.LevelInfo,
+			fmt.Sprintf("💸 Autonomous execution settled\nRoute: *%s → %s*\nAmount: *%d* base units\nSettlement tx: `%s`",
+				fromSymbol, toSymbol, settleAmount, settlementSig))
+	}
+	return nil
+}
+
+func (e *Engine) failExecutionJob(jobID int64, note string) error {
+	if err := execution.New(e.executor, e.cfg, e.store).MarkFailed(jobID, note); err != nil && e.store != nil {
+		log.Printf("[pipeline] failed to persist execution job %d failure note: %v", jobID, err)
+	}
+	return fmt.Errorf("%s", note)
+}
+
+func (e *Engine) recordDecisionTrace(ctx context.Context, d *ai.FinalDecision, score risk.ScoreV2) (string, error) {
 	var actionCode uint8
 	switch d.Action {
 	case ai.ActionProtect:
@@ -450,12 +684,7 @@ func (e *Engine) executeDecision(ctx context.Context, d *ai.FinalDecision, score
 	if confidence > 100 {
 		confidence = 100
 	}
-	decSig, err := e.executor.SendRecordDecision(ctx, actionCode, rationale, confidence)
-	if err != nil {
-		log.Printf("[pipeline] record_decision failed: %v", err)
-		return
-	}
-	log.Printf("[pipeline] record_decision tx: %s", decSig)
+	return e.executor.SendRecordDecision(ctx, actionCode, rationale, confidence)
 }
 
 func (e *Engine) fetchBalances(ctx context.Context) []uint64 {
@@ -525,7 +754,7 @@ func (e *Engine) CircuitTripped() bool {
 // handleYield manages simulated yield positions based on AI decisions and risk level.
 // Entry: OPTIMIZE decision + risk < YieldEntryRisk + no open position.
 // Exit:  risk > YieldExitRisk + open position exists.
-func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *ai.FinalDecision) {
+func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *ai.FinalDecision, eval policy.Evaluation) {
 	e.mu.Lock()
 	activeID := e.activeYieldPositionID
 	e.mu.Unlock()
@@ -645,6 +874,21 @@ func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *
 	if decision == nil || decision.Action != ai.ActionOptimize {
 		return
 	}
+	if eval.ActionClass != policy.ActionClassYieldAllocate {
+		return
+	}
+	if eval.Verdict != policy.VerdictAllowed {
+		e.mu.Lock()
+		e.lastExecSig = ""
+		if eval.Verdict == policy.VerdictRequiresApproval {
+			e.lastExecStatus = "approval_required"
+		} else {
+			e.lastExecStatus = "blocked_by_policy"
+		}
+		e.lastExecNote = eval.Reason
+		e.mu.Unlock()
+		return
+	}
 	if score.RiskLevel > e.cfg.YieldEntryRisk {
 		return
 	}
@@ -656,6 +900,15 @@ func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *
 	}
 	if best == nil || best.SupplyAPY < e.cfg.YieldMinAPY {
 		log.Printf("[yield] no suitable opportunity (min APY %.1f%%)", e.cfg.YieldMinAPY)
+		return
+	}
+	liveYieldEnabled, liveYieldReason := e.liveYieldMode()
+	if !liveYieldEnabled {
+		e.mu.Lock()
+		e.lastExecSig = ""
+		e.lastExecStatus = "signal_only"
+		e.lastExecNote = fmt.Sprintf("YIELD_MAX found an opportunity in %s, but live yield execution is blocked: %s", best.DisplayName, liveYieldReason)
+		e.mu.Unlock()
 		return
 	}
 
@@ -695,7 +948,6 @@ func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *
 	e.mu.Unlock()
 
 	liveDepositSig := depositSig
-	liveYieldEnabled, liveYieldReason := e.liveYieldMode()
 	if kvault := e.kaminoVault(best.Token); kvault != "" && best.Protocol == yield.ProtocolKamino && liveYieldEnabled {
 		txB64, err := yield.BuildKaminoDepositTx(ctx, e.executor.WalletAddress().String(), kvault, fmt.Sprintf("%.6f", amount))
 		if err != nil {
@@ -722,12 +974,6 @@ func (e *Engine) handleYield(ctx context.Context, score risk.ScoreV2, decision *
 		e.lastExecNote = fmt.Sprintf("Yield entry deposited %s into Kamino automatically.", best.Token)
 		e.mu.Unlock()
 		log.Printf("[yield] Kamino deposit tx: %s", kaminoSig)
-	} else if kvault := e.kaminoVault(best.Token); kvault != "" && best.Protocol == yield.ProtocolKamino && !liveYieldEnabled {
-		e.mu.Lock()
-		e.lastExecSig = depositSig
-		e.lastExecStatus = "executed"
-		e.lastExecNote = fmt.Sprintf("Yield entry moved %s into the trusted strategy account, but live Kamino execution is paused: %s", best.Token, liveYieldReason)
-		e.mu.Unlock()
 	}
 
 	posID, err := e.store.SaveYieldPosition(
@@ -796,13 +1042,33 @@ func (e *Engine) liveYieldMode() (bool, string) {
 	if e.cfg == nil {
 		return false, "runtime config is not attached"
 	}
+	if currentControlMode(e.cfg) != "YIELD_MAX" {
+		return false, "live yield execution is only enabled in YIELD_MAX control mode"
+	}
 	if !e.cfg.YieldEnabled {
 		return false, "yield mode is disabled"
 	}
-	if !config.IsMainnetRPC(e.cfg.SolanaRPCURL) {
-		return false, "live yield mode is disabled because the backend is not connected to a mainnet RPC"
+	readiness := e.cfg.YieldExecutionReadiness()
+	if !readiness.ReadyForLive {
+		return false, readiness.Note
 	}
 	return true, ""
+}
+
+func currentControlMode(cfg *config.Config) string {
+	if cfg == nil {
+		return "UNKNOWN"
+	}
+	switch {
+	case !cfg.AutoExecute && !cfg.YieldEnabled:
+		return "MANUAL"
+	case cfg.StrategyMode == 0 && cfg.AutoExecute && !cfg.YieldEnabled:
+		return "GUARDED"
+	case cfg.StrategyMode == 2 && cfg.YieldEnabled:
+		return "YIELD_MAX"
+	default:
+		return "BALANCED"
+	}
 }
 
 func tokenIndexBySymbol(symbol string) (uint8, bool) {
@@ -812,6 +1078,23 @@ func tokenIndexBySymbol(symbol string) (uint8, bool) {
 		}
 	}
 	return 0, false
+}
+
+func tokenSymbolByIndex(idx uint8) (string, bool) {
+	feed, ok := pyth.FeedBySlot(int(idx))
+	if !ok {
+		return "", false
+	}
+	return feed.Symbol, true
+}
+
+func tokenFeedBySymbol(symbol string) (pyth.TokenFeed, bool) {
+	for _, feed := range pyth.ActiveFeeds {
+		if feed.Symbol == symbol {
+			return feed, true
+		}
+	}
+	return pyth.TokenFeed{}, false
 }
 
 // minPriceU64 returns the minimum price across all tokens as a uint64
@@ -847,5 +1130,52 @@ func strategyName(mode uint8) string {
 		return "YIELD"
 	default:
 		return "BALANCED"
+	}
+}
+
+// autoRebalanceOnChain submits execute_rebalance on-chain whenever the AI
+// decides PROTECT or OPTIMIZE. This is purely vault accounting — no Jupiter
+// swap required — so it works on devnet and mainnet alike.
+func (e *Engine) autoRebalanceOnChain(ctx context.Context, d *ai.FinalDecision, balances []uint64) {
+	if d.FromIndex < 0 || d.ToIndex < 0 {
+		return
+	}
+	var fromBal uint64
+	if d.FromIndex < len(balances) {
+		fromBal = balances[d.FromIndex]
+	}
+	if fromBal == 0 {
+		log.Printf("[pipeline:rebalance] skipped — from_balance[%d] is zero", d.FromIndex)
+		return
+	}
+	fraction := d.SuggestedFraction
+	if fraction <= 0 {
+		fraction = 0.10 // default 10% if AI didn't specify
+	}
+	amount := uint64(float64(fromBal) * fraction)
+	if amount == 0 {
+		return
+	}
+
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	sig, err := e.executor.ExecuteRebalance(ctx2, uint8(d.FromIndex), uint8(d.ToIndex), amount)
+	if err != nil {
+		log.Printf("[pipeline:rebalance] execute_rebalance failed: %v", err)
+		return
+	}
+	log.Printf("[pipeline:rebalance] execute_rebalance OK: from=%d to=%d amount=%d sig=%s",
+		d.FromIndex, d.ToIndex, amount, sig)
+
+	e.mu.Lock()
+	e.lastExecSig = sig
+	e.lastExecStatus = "executed"
+	e.lastExecNote = fmt.Sprintf("AI %s: rebalanced %d units from slot %d → slot %d", d.Action, amount, d.FromIndex, d.ToIndex)
+	e.mu.Unlock()
+
+	// Save to history store if available
+	if e.store != nil {
+		_ = e.store.SaveRebalance(d.FromIndex, d.ToIndex, amount, sig, 0)
 	}
 }

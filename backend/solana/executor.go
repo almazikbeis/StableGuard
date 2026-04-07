@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -26,6 +29,10 @@ type Executor struct {
 	wallet      solana.PrivateKey
 	programID   solana.PublicKey
 	authorityPK solana.PublicKey // explicit authority for PDA derivation (may differ from wallet when wallet = agent)
+
+	// recordDecisionMu serializes record_decision calls so the pipeline background
+	// loop and manual demo button don't race for the same decision_count PDA slot.
+	recordDecisionMu sync.Mutex
 }
 
 // VaultState mirrors the on-chain VaultState account layout.
@@ -116,7 +123,9 @@ func (e *Executor) ExecuteRebalance(ctx context.Context, fromIndex, toIndex uint
 
 // FetchVaultState fetches and decodes the on-chain VaultState account.
 func (e *Executor) FetchVaultState(ctx context.Context, vaultPDA solana.PublicKey) (*VaultState, error) {
-	acc, err := e.rpcClient.GetAccountInfo(ctx, vaultPDA)
+	acc, err := e.rpcClient.GetAccountInfoWithOpts(ctx, vaultPDA, &rpc.GetAccountInfoOpts{
+		Commitment: rpc.CommitmentConfirmed,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("get account: %w", err)
 	}
@@ -185,6 +194,29 @@ func (e *Executor) FetchVaultState(ctx context.Context, vaultPDA solana.PublicKe
 	vs.PositionEpoch = binary.LittleEndian.Uint64(data[offset:])
 
 	return vs, nil
+}
+
+// SendInitialize submits an initialize_vault instruction on-chain.
+// Creates the vault PDA for the wallet authority.
+func (e *Executor) SendInitialize(ctx context.Context, rebalanceThreshold, maxDeposit uint64) (string, error) {
+	authority := e.wallet.PublicKey()
+	vaultPDA, _, err := e.DeriveVaultPDA(authority)
+	if err != nil {
+		return "", fmt.Errorf("derive vault pda: %w", err)
+	}
+
+	// instruction data: discriminator(8) + rebalance_threshold(8) + max_deposit(8)
+	disc := anchorDiscriminator("initialize_vault")
+	data := make([]byte, 8+8+8)
+	copy(data[0:8], disc)
+	binary.LittleEndian.PutUint64(data[8:], rebalanceThreshold)
+	binary.LittleEndian.PutUint64(data[16:], maxDeposit)
+
+	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
+		{PublicKey: authority, IsSigner: true, IsWritable: true},
+		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
+		{PublicKey: solana.SystemProgramID, IsSigner: false, IsWritable: false},
+	})
 }
 
 // SendRegisterToken submits a register_token instruction on-chain.
@@ -385,7 +417,8 @@ func (e *Executor) sendSimpleTx(ctx context.Context, data []byte, accounts []*so
 	}
 
 	sig, err := e.rpcClient.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{
-		SkipPreflight: false,
+		SkipPreflight:       false,
+		PreflightCommitment: rpc.CommitmentConfirmed, // use confirmed not finalized so recent on-chain state is visible
 	})
 	if err != nil {
 		return "", fmt.Errorf("send tx: %w", err)
@@ -416,17 +449,17 @@ func (e *Executor) DeriveDecisionPDA(vaultPDA solana.PublicKey, decisionCount ui
 	)
 }
 
-// DeriveUserPositionPDA derives the PDA for a user's position in the vault.
-func (e *Executor) DeriveUserPositionPDA(vaultPDA, user solana.PublicKey) (solana.PublicKey, uint8, error) {
-	return solana.FindProgramAddress(
-		[][]byte{[]byte("user_position"), vaultPDA.Bytes(), user.Bytes()},
-		e.programID,
-	)
-}
-
 // SendRecordDecision submits a record_decision instruction on-chain.
 // It fetches the current decision_count from vault state to derive the correct PDA.
+// If the PDA slot is already occupied (prior session state mismatch), it retries
+// with incremented counts up to 5 times to find an empty slot.
 func (e *Executor) SendRecordDecision(ctx context.Context, action uint8, rationale string, confidence uint8) (string, error) {
+	// Serialize all record_decision calls: pipeline loop + manual demo button
+	// both write to the same sequential PDA slot. Without this lock they race,
+	// each reading the same decision_count and then colliding on-chain.
+	e.recordDecisionMu.Lock()
+	defer e.recordDecisionMu.Unlock()
+
 	authority := e.wallet.PublicKey()
 	vaultPDA, _, err := e.DeriveVaultPDA(authority)
 	if err != nil {
@@ -438,17 +471,11 @@ func (e *Executor) SendRecordDecision(ctx context.Context, action uint8, rationa
 		return "", fmt.Errorf("fetch vault state: %w", err)
 	}
 
-	decisionPDA, _, err := e.DeriveDecisionPDA(vaultPDA, vs.DecisionCount)
-	if err != nil {
-		return "", fmt.Errorf("derive decision pda: %w", err)
-	}
-
 	// Borsh serialization: action(u8) + rationale(u32 len + bytes) + confidence(u8)
 	rationaleBytes := []byte(rationale)
 	if len(rationaleBytes) > 200 {
 		rationaleBytes = rationaleBytes[:200]
 	}
-
 	disc := anchorDiscriminator("record_decision")
 	data := make([]byte, 8+1+4+len(rationaleBytes)+1)
 	copy(data[0:8], disc)
@@ -457,12 +484,44 @@ func (e *Executor) SendRecordDecision(ctx context.Context, action uint8, rationa
 	copy(data[13:], rationaleBytes)
 	data[13+len(rationaleBytes)] = confidence
 
-	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
-		{PublicKey: authority, IsSigner: true, IsWritable: true},
-		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
-		{PublicKey: decisionPDA, IsSigner: false, IsWritable: true},
-		{PublicKey: solana.SystemProgramID, IsSigner: false, IsWritable: false},
-	})
+	// Retry loop: re-fetch vault state on ConstraintSeeds (race condition where
+	// another record_decision incremented decision_count between our read and TX).
+	// Also skip already-occupied slots by incrementing the counter.
+	currentCount := vs.DecisionCount
+	for attempt := 0; attempt < 50; attempt++ {
+		decisionPDA, _, pdaErr := e.DeriveDecisionPDA(vaultPDA, currentCount)
+		if pdaErr != nil {
+			return "", fmt.Errorf("derive decision pda: %w", pdaErr)
+		}
+		sig, txErr := e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
+			{PublicKey: authority, IsSigner: true, IsWritable: true},
+			{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
+			{PublicKey: decisionPDA, IsSigner: false, IsWritable: true},
+			{PublicKey: solana.SystemProgramID, IsSigner: false, IsWritable: false},
+		})
+		if txErr == nil {
+			return sig, nil
+		}
+		errStr := txErr.Error()
+		// PDA slot already used — advance to next sequence number
+		if strings.Contains(errStr, "already in use") {
+			currentCount++
+			continue
+		}
+		// ConstraintSeeds (0x7d6): on-chain decision_count diverged from our read
+		// because another goroutine wrote a record_decision in between.
+		// Re-fetch the vault to get the true current count and retry.
+		if strings.Contains(errStr, "ConstraintSeeds") || strings.Contains(errStr, "0x7d6") {
+			if fresh, fetchErr := e.FetchVaultState(ctx, vaultPDA); fetchErr == nil {
+				currentCount = fresh.DecisionCount
+			} else {
+				currentCount++
+			}
+			continue
+		}
+		return "", txErr
+	}
+	return "", fmt.Errorf("record_decision: failed after 50 attempts (decision_count=%d)", currentCount)
 }
 
 // PubkeyToBase58 converts a raw [32]byte public key to its base58 string.
@@ -494,6 +553,24 @@ func loadWallet(path string) (solana.PrivateKey, error) {
 // Use this when the wallet is the delegated agent (not the vault authority).
 func (e *Executor) SetAuthorityPK(pk solana.PublicKey) {
 	e.authorityPK = pk
+}
+
+// SendAdminResetDecisionCount sets vault.decision_count to newCount.
+// Use once to fix a stuck PDA slot (e.g. after vault re-init left count at 0 but PDA 0 is occupied).
+func (e *Executor) SendAdminResetDecisionCount(ctx context.Context, newCount uint64) (string, error) {
+	authority := e.wallet.PublicKey()
+	vaultPDA, _, err := e.DeriveVaultPDA(authority)
+	if err != nil {
+		return "", fmt.Errorf("derive vault pda: %w", err)
+	}
+	disc := anchorDiscriminator("admin_reset_decision_count")
+	data := make([]byte, 8+8)
+	copy(data[0:8], disc)
+	binary.LittleEndian.PutUint64(data[8:], newCount)
+	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
+		{PublicKey: authority, IsSigner: true, IsWritable: true},
+		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
+	})
 }
 
 // SendDelegateAgent submits a delegate_agent instruction on-chain.
@@ -538,10 +615,9 @@ func (e *Executor) SendUpdatePriceAndCheck(ctx context.Context, price uint64) (s
 	})
 }
 
-// SendDeposit submits a deposit instruction on-chain from the executor wallet's token account.
-// Use this to return funds from a trusted external strategy account back into the vault.
-func (e *Executor) SendDeposit(ctx context.Context, amount uint64, userTokenAccount string, tokenIndex uint8) (string, error) {
-	user := e.wallet.PublicKey()
+// SendDeposit submits a treasury deposit from an authority-owned strategy account back into the vault.
+func (e *Executor) SendDeposit(ctx context.Context, amount uint64, authorityTokenAccount string, tokenIndex uint8) (string, error) {
+	authority := e.wallet.PublicKey()
 	vaultPDA, _, err := e.DeriveVaultPDA(e.authorityPK)
 	if err != nil {
 		return "", fmt.Errorf("derive vault pda: %w", err)
@@ -555,15 +631,11 @@ func (e *Executor) SendDeposit(ctx context.Context, amount uint64, userTokenAcco
 		return "", fmt.Errorf("token_index %d out of range", tokenIndex)
 	}
 
-	userTokenPK, err := solana.PublicKeyFromBase58(userTokenAccount)
+	authorityTokenPK, err := solana.PublicKeyFromBase58(authorityTokenAccount)
 	if err != nil {
-		return "", fmt.Errorf("invalid user token account: %w", err)
+		return "", fmt.Errorf("invalid authority token account: %w", err)
 	}
 	vaultTokenAccount := solana.PublicKeyFromBytes(vs.VaultTokens[tokenIndex][:])
-	userPositionPDA, _, err := e.DeriveUserPositionPDA(vaultPDA, user)
-	if err != nil {
-		return "", fmt.Errorf("derive user position pda: %w", err)
-	}
 
 	disc := anchorDiscriminator("deposit")
 	data := make([]byte, 8+1+8)
@@ -573,13 +645,11 @@ func (e *Executor) SendDeposit(ctx context.Context, amount uint64, userTokenAcco
 
 	tokenProgram := solana.MustPublicKeyFromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
-		{PublicKey: user, IsSigner: true, IsWritable: true},
+		{PublicKey: authority, IsSigner: true, IsWritable: true},
 		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
-		{PublicKey: userTokenPK, IsSigner: false, IsWritable: true},
+		{PublicKey: authorityTokenPK, IsSigner: false, IsWritable: true},
 		{PublicKey: vaultTokenAccount, IsSigner: false, IsWritable: true},
-		{PublicKey: userPositionPDA, IsSigner: false, IsWritable: true},
 		{PublicKey: tokenProgram, IsSigner: false, IsWritable: false},
-		{PublicKey: solana.SystemProgramID, IsSigner: false, IsWritable: false},
 	})
 }
 
@@ -602,12 +672,105 @@ func (e *Executor) SendExternalTransaction(ctx context.Context, txBase64 string)
 	}
 
 	sig, err := e.rpcClient.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{
-		SkipPreflight: false,
+		SkipPreflight:       false,
+		PreflightCommitment: rpc.CommitmentConfirmed, // use confirmed not finalized so recent on-chain state is visible
 	})
 	if err != nil {
 		return "", fmt.Errorf("send external tx: %w", err)
 	}
 	return sig.String(), nil
+}
+
+// SimulateExternalTransaction signs an externally-built base64 transaction with the executor wallet and runs RPC simulation.
+func (e *Executor) SimulateExternalTransaction(ctx context.Context, txBase64 string) (*rpc.SimulateTransactionResult, error) {
+	tx, err := solana.TransactionFromBase64(txBase64)
+	if err != nil {
+		return nil, fmt.Errorf("decode external tx: %w", err)
+	}
+
+	signer := e.wallet.PublicKey()
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(signer) {
+			return &e.wallet
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sign external tx for simulation: %w", err)
+	}
+
+	out, err := e.rpcClient.SimulateTransactionWithOpts(ctx, tx, &rpc.SimulateTransactionOpts{
+		SigVerify:  true,
+		Commitment: rpc.CommitmentProcessed,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("simulate external tx: %w", err)
+	}
+	if out == nil || out.Value == nil {
+		return nil, fmt.Errorf("empty simulation response")
+	}
+	return out.Value, nil
+}
+
+// WaitForSignatureConfirmation polls RPC until a signature reaches the requested confirmation status.
+func (e *Executor) WaitForSignatureConfirmation(
+	ctx context.Context,
+	sig string,
+	timeout time.Duration,
+	required rpc.ConfirmationStatusType,
+) (*rpc.SignatureStatusesResult, error) {
+	parsed, err := solana.SignatureFromBase58(sig)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature: %w", err)
+	}
+
+	waitCtx := ctx
+	cancel := func() {}
+	if timeout > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		out, err := e.rpcClient.GetSignatureStatuses(waitCtx, true, parsed)
+		if err != nil {
+			return nil, fmt.Errorf("get signature status: %w", err)
+		}
+		if out != nil && len(out.Value) > 0 && out.Value[0] != nil {
+			status := out.Value[0]
+			if status.Err != nil {
+				return status, fmt.Errorf("transaction execution failed: %v", status.Err)
+			}
+			if confirmationSatisfied(status, required) {
+				return status, nil
+			}
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return nil, fmt.Errorf("confirmation timeout: %w", waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func confirmationSatisfied(status *rpc.SignatureStatusesResult, required rpc.ConfirmationStatusType) bool {
+	if status == nil {
+		return false
+	}
+	switch required {
+	case rpc.ConfirmationStatusFinalized:
+		return status.ConfirmationStatus == rpc.ConfirmationStatusFinalized
+	case rpc.ConfirmationStatusConfirmed:
+		return status.ConfirmationStatus == rpc.ConfirmationStatusConfirmed || status.ConfirmationStatus == rpc.ConfirmationStatusFinalized
+	default:
+		return status.ConfirmationStatus == rpc.ConfirmationStatusProcessed ||
+			status.ConfirmationStatus == rpc.ConfirmationStatusConfirmed ||
+			status.ConfirmationStatus == rpc.ConfirmationStatusFinalized
+	}
 }
 
 // TokenAccountBalance returns the raw amount in base units for the given SPL token account.
@@ -634,7 +797,97 @@ func (e *Executor) TokenAccountBalance(ctx context.Context, account string) (uin
 	return amt, nil
 }
 
+// SendRecordSwapResult submits a record_swap_result instruction on-chain.
+// Called after a successful external Jupiter swap to settle vault accounting.
+// This provides a verifiable on-chain receipt of the rebalance:
+//
+//	execute_rebalance (intent) → external swap TX → record_swap_result (settlement)
+func (e *Executor) SendRecordSwapResult(ctx context.Context, fromIndex, toIndex uint8, inputAmount, outputAmount uint64, swapSig string) (string, error) {
+	signer := e.wallet.PublicKey()
+	vaultPDA, _, err := e.DeriveVaultPDA(e.authorityPK)
+	if err != nil {
+		return "", fmt.Errorf("derive vault pda: %w", err)
+	}
+
+	// Borsh: from_index(1) + to_index(1) + input_amount(8) + output_amount(8) + swap_sig len(4) + swap_sig bytes
+	sigBytes := []byte(swapSig)
+	if len(sigBytes) > 88 {
+		sigBytes = sigBytes[:88]
+	}
+	disc := anchorDiscriminator("record_swap_result")
+	data := make([]byte, 8+1+1+8+8+4+len(sigBytes))
+	copy(data[0:8], disc)
+	data[8] = fromIndex
+	data[9] = toIndex
+	binary.LittleEndian.PutUint64(data[10:], inputAmount)
+	binary.LittleEndian.PutUint64(data[18:], outputAmount)
+	binary.LittleEndian.PutUint32(data[26:], uint32(len(sigBytes)))
+	copy(data[30:], sigBytes)
+
+	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
+		{PublicKey: signer, IsSigner: true, IsWritable: true},
+		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
+	})
+}
+
 // SendTogglePause submits a toggle_pause instruction on-chain.
+// MintTokensTo mints `amount` tokens (in base units) to `destATA`.
+// Requires the executor wallet to be the mint authority of `mintAddr`.
+// Used on devnet as a swap fallback when Jupiter is unavailable.
+func (e *Executor) MintTokensTo(ctx context.Context, mintAddr, destATA string, amount uint64) (string, error) {
+	mintPK, err := solana.PublicKeyFromBase58(mintAddr)
+	if err != nil {
+		return "", fmt.Errorf("invalid mint: %w", err)
+	}
+	destPK, err := solana.PublicKeyFromBase58(destATA)
+	if err != nil {
+		return "", fmt.Errorf("invalid dest ATA: %w", err)
+	}
+	authority := e.wallet.PublicKey()
+	tokenProgram := solana.MustPublicKeyFromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+
+	// SPL Token MintTo instruction: index=7, amount u64 LE
+	data := make([]byte, 9)
+	data[0] = 7
+	binary.LittleEndian.PutUint64(data[1:], amount)
+
+	instr := &solana.GenericInstruction{
+		ProgID: tokenProgram,
+		AccountValues: []*solana.AccountMeta{
+			{PublicKey: mintPK, IsSigner: false, IsWritable: true},
+			{PublicKey: destPK, IsSigner: false, IsWritable: true},
+			{PublicKey: authority, IsSigner: true, IsWritable: false},
+		},
+		DataBytes: data,
+	}
+
+	recent, err := e.rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return "", fmt.Errorf("get blockhash: %w", err)
+	}
+	tx, err := solana.NewTransaction([]solana.Instruction{instr}, recent.Value.Blockhash, solana.TransactionPayer(authority))
+	if err != nil {
+		return "", fmt.Errorf("build mint tx: %w", err)
+	}
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(authority) {
+			return &e.wallet
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("sign mint tx: %w", err)
+	}
+	sig, err := e.rpcClient.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{
+		SkipPreflight:       false,
+		PreflightCommitment: rpc.CommitmentConfirmed,
+	})
+	if err != nil {
+		return "", fmt.Errorf("send mint tx: %w", err)
+	}
+	return sig.String(), nil
+}
+
 func (e *Executor) SendTogglePause(ctx context.Context) (string, error) {
 	authority := e.wallet.PublicKey()
 	vaultPDA, _, err := e.DeriveVaultPDA(authority)
@@ -643,6 +896,33 @@ func (e *Executor) SendTogglePause(ctx context.Context) (string, error) {
 	}
 	disc := anchorDiscriminator("toggle_pause")
 	return e.sendSimpleTx(ctx, disc, []*solana.AccountMeta{
+		{PublicKey: authority, IsSigner: true, IsWritable: true},
+		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
+	})
+}
+
+// SendSetDemoBalances calls set_demo_balances on devnet to write accounting balances
+// directly into the vault without real SPL transfers. Demo/devnet only.
+func (e *Executor) SendSetDemoBalances(ctx context.Context, balances []uint64, totalDeposited uint64) (string, error) {
+	authority := e.wallet.PublicKey()
+	vaultPDA, _, err := e.DeriveVaultPDA(authority)
+	if err != nil {
+		return "", fmt.Errorf("derive vault pda: %w", err)
+	}
+
+	disc := anchorDiscriminator("set_demo_balances")
+
+	// Borsh-encode: Vec<u64> = 4-byte length prefix + 8 bytes per element, then u64 total_deposited
+	n := len(balances)
+	data := make([]byte, 8+4+n*8+8)
+	copy(data[0:8], disc)
+	binary.LittleEndian.PutUint32(data[8:12], uint32(n))
+	for i, b := range balances {
+		binary.LittleEndian.PutUint64(data[12+i*8:], b)
+	}
+	binary.LittleEndian.PutUint64(data[12+n*8:], totalDeposited)
+
+	return e.sendSimpleTx(ctx, data, []*solana.AccountMeta{
 		{PublicKey: authority, IsSigner: true, IsWritable: true},
 		{PublicKey: vaultPDA, IsSigner: false, IsWritable: true},
 	})

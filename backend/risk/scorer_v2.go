@@ -21,25 +21,30 @@ const (
 
 // PricePoint is a single timestamped observation in the sliding window.
 type PricePoint struct {
-	Time      time.Time
-	USDCPrice float64
-	USDTPrice float64
-	Deviation float64 // |USDC-USDT| / avg * 100
+	Time              time.Time
+	USDCPrice         float64
+	USDTPrice         float64
+	Deviation         float64            // |USDC-USDT| / avg * 100
+	VolatilePctChange float64            // max single-tick % change among volatile assets
+	VolatilePrices    map[string]float64 // symbol → price (BTC/ETH/SOL)
 }
 
 // ScoreV2 holds the enhanced risk metrics from the windowed scorer.
 type ScoreV2 struct {
-	RiskLevel         float64 // 0–100 (weighted composite)
-	Deviation         float64 // current price deviation %
-	Trend             float64 // linear slope of deviation over window (positive = worsening)
-	Velocity          float64 // absolute change from previous tick
-	Volatility        float64 // std-dev of deviations in window
-	FromIndex         int     // token slot to rebalance from (-1 = hold)
-	ToIndex           int     // token slot to rebalance into  (-1 = hold)
-	SuggestedFraction float64 // 0–0.5 of total vault
-	Action            string  // "hold" | "rebalance"
-	Summary           string
-	WindowSize        int // how many points in window
+	RiskLevel         float64            `json:"risk_level"`          // 0–100 (weighted composite)
+	Deviation         float64            `json:"deviation_pct"`       // current price deviation %
+	Trend             float64            `json:"trend"`               // linear slope of deviation over window
+	Velocity          float64            `json:"velocity"`            // absolute change from previous tick
+	Volatility        float64            `json:"volatility"`          // std-dev of deviations in window
+	StableRisk        float64            `json:"stable_risk"`         // stablecoin peg component 0–100
+	VolatileRisk      float64            `json:"volatile_risk"`       // volatile crash component 0–100
+	VolatilePrices    map[string]float64 `json:"volatile_prices"`     // BTC/ETH/SOL current prices
+	FromIndex         int                `json:"from_index"`          // token slot to rebalance from (-1 = hold)
+	ToIndex           int                `json:"to_index"`            // token slot to rebalance into  (-1 = hold)
+	SuggestedFraction float64            `json:"suggested_fraction"`  // 0–0.5 of total vault
+	Action            string             `json:"action"`              // "hold" | "rebalance"
+	Summary           string             `json:"summary"`
+	WindowSize        int                `json:"window_size"`
 }
 
 // WindowedScorer maintains a sliding window of price observations.
@@ -66,11 +71,32 @@ func (w *WindowedScorer) Push(snap *pyth.PriceSnapshot) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Track volatile asset prices and compute max 1-tick % change.
+	volatileFeeds := pyth.VolatileFeeds()
+	volatilePrices := make(map[string]float64, len(volatileFeeds))
+	var maxChange float64
+	for _, f := range volatileFeeds {
+		if pd, ok := snap.All[f.Symbol]; ok && pd.Price > 0 {
+			volatilePrices[f.Symbol] = pd.Price
+			if len(w.window) > 0 {
+				prev := w.window[len(w.window)-1]
+				if prevPrice, ok2 := prev.VolatilePrices[f.Symbol]; ok2 && prevPrice > 0 {
+					change := math.Abs(pd.Price-prevPrice) / prevPrice * 100
+					if change > maxChange {
+						maxChange = change
+					}
+				}
+			}
+		}
+	}
+
 	pt := PricePoint{
-		Time:      snap.FetchedAt,
-		USDCPrice: snap.USDC.Price,
-		USDTPrice: snap.USDT.Price,
-		Deviation: snap.Deviation(),
+		Time:              snap.FetchedAt,
+		USDCPrice:         snap.USDC.Price,
+		USDTPrice:         snap.USDT.Price,
+		Deviation:         snap.Deviation(),
+		VolatilePctChange: maxChange,
+		VolatilePrices:    volatilePrices,
 	}
 	w.window = append(w.window, pt)
 	if len(w.window) > w.maxSize {
@@ -101,19 +127,59 @@ func (w *WindowedScorer) Compute(snap *pyth.PriceSnapshot, balances []uint64, st
 		volatility = stdDev(pts)
 	}
 
+	// ── Window-level crash detection (computed early, used for risk score) ──
+	// Compare window-start prices to current snap prices for each volatile asset.
+	// A sustained 20% drop over the window = max volatile signal (100).
+	currentVolatilePrices := make(map[string]float64)
+	for _, f := range pyth.VolatileFeeds() {
+		if pd, ok := snap.All[f.Symbol]; ok && pd.Price > 0 {
+			currentVolatilePrices[f.Symbol] = pd.Price
+		}
+	}
+
+	var windowCrashPct float64
+	crashSlot := -1
+	crashSymbol := ""
+	if len(pts) >= 1 {
+		first := pts[0]
+		for _, f := range pyth.VolatileFeeds() {
+			firstP, ok1 := first.VolatilePrices[f.Symbol]
+			lastP, ok2 := currentVolatilePrices[f.Symbol]
+			if !ok2 && len(pts) >= 2 {
+				lastP, ok2 = pts[len(pts)-1].VolatilePrices[f.Symbol]
+			}
+			if ok1 && ok2 && firstP > 0 && lastP > 0 {
+				drop := (firstP - lastP) / firstP * 100 // positive = price dropped
+				if drop > windowCrashPct {
+					windowCrashPct = drop
+					crashSlot = f.VaultSlot
+					crashSymbol = f.Symbol
+				}
+			}
+		}
+	}
+	// 10% sustained crash over the window = full volatile signal (100).
+	// Threshold lowered from 20% to 10% so a real 10%+ drop registers as critical.
+	volatileScore := math.Min(100, windowCrashPct/10.0*100)
+
 	// ── Normalize each component to 0–100 ─────────────────────────────────
-	// Thresholds chosen for stablecoin context:
-	//   0.10% deviation = full crisis
-	//   0.02% velocity per tick = high velocity
-	//   0.005% slope per tick = clear trend
-	//   0.05% std-dev = high volatility
 	devScore := math.Min(100, current/0.10*100)
 	velScore := math.Min(100, velocity/0.02*100)
 	trendScore := math.Min(100, math.Max(0, trend/0.005*100))
 	volScore := math.Min(100, volatility/0.05*100)
 
 	// ── Weighted composite ─────────────────────────────────────────────────
-	raw := devScore*0.4 + velScore*0.2 + trendScore*0.2 + volScore*0.2
+	// Normal market: Stable peg 35% | velocity 15% | trend 10% | vol 10% | crash 30%
+	// Crisis market: when crash signal dominates (>50), shift weights so crash
+	//               drives the overall score — mirrors how a real risk manager
+	//               would treat a major drawdown vs minor peg noise.
+	var raw float64
+	if volatileScore > 50 {
+		// Crisis mode: crash takes 65% weight, stable components share 35%
+		raw = devScore*0.15 + velScore*0.08 + trendScore*0.06 + volScore*0.06 + volatileScore*0.65
+	} else {
+		raw = devScore*0.35 + velScore*0.15 + trendScore*0.10 + volScore*0.10 + volatileScore*0.30
+	}
 
 	// ── Strategy sensitivity ───────────────────────────────────────────────
 	var sensitivity, threshold float64
@@ -132,21 +198,24 @@ func (w *WindowedScorer) Compute(snap *pyth.PriceSnapshot, balances []uint64, st
 	riskLevel := math.Min(100, math.Round(raw*sensitivity*100)/100)
 
 	s := ScoreV2{
-		RiskLevel:  riskLevel,
-		Deviation:  current,
-		Trend:      trend,
-		Velocity:   velocity,
-		Volatility: volatility,
-		FromIndex:  -1,
-		ToIndex:    -1,
-		WindowSize: len(pts),
+		RiskLevel:      riskLevel,
+		Deviation:      current,
+		Trend:          trend,
+		Velocity:       velocity,
+		Volatility:     volatility,
+		StableRisk:     math.Round(devScore*100) / 100,
+		VolatileRisk:   math.Round(volatileScore*100) / 100,
+		VolatilePrices: currentVolatilePrices,
+		FromIndex:      -1,
+		ToIndex:        -1,
+		WindowSize:     len(pts),
 	}
 
 	if riskLevel < threshold {
 		s.Action = "hold"
 		s.Summary = fmt.Sprintf(
-			"Risk %.1f < threshold %.0f | dev=%.5f%% vel=%.6f trend=%.6f vol=%.6f — HOLD",
-			riskLevel, threshold, current, velocity, trend, volatility,
+			"Risk %.1f < threshold %.0f | dev=%.5f%% vel=%.6f trend=%.6f vol=%.6f crash=%.2f%% — HOLD",
+			riskLevel, threshold, current, velocity, trend, volatility, windowCrashPct,
 		)
 		w.mu.Lock()
 		w.lastScore = s
@@ -168,23 +237,38 @@ func (w *WindowedScorer) Compute(snap *pyth.PriceSnapshot, balances []uint64, st
 	}
 
 	// ── Direction ────────────────────────────────────────────────────────
-	// Sell the overpriced token, buy the underpriced one.
-	if snap.USDC.Price > snap.USDT.Price {
-		s.FromIndex = 0 // USDC slot
-		s.ToIndex = 1   // USDT slot
+	// Volatile crash takes priority: move crashing asset to USDC.
+	// Threshold: 3% sustained drop over the window.
+	if crashSlot >= 0 && windowCrashPct > 3.0 {
+		s.FromIndex = crashSlot
+		s.ToIndex = 0 // USDC is always slot 0
 		s.Action = "rebalance"
+		s.SuggestedFraction = math.Min(0.5, windowCrashPct/50)
+		s.Summary = fmt.Sprintf(
+			"Risk %.1f/100 | %s -%.1f%% crash over window → REBALANCE [slot%d→USDC] %.1f%%",
+			riskLevel, crashSymbol, windowCrashPct, crashSlot, s.SuggestedFraction*100,
+		)
+	} else if snap.USDC.Price > snap.USDT.Price {
+		// Stablecoin depeg: sell expensive USDC, buy USDT
+		s.FromIndex = 0
+		s.ToIndex = 1
+		s.Action = "rebalance"
+		s.SuggestedFraction = math.Min(0.5, riskLevel/200)
+		s.Summary = fmt.Sprintf(
+			"Risk %.1f/100 | dev=%.5f%% vel=%.6f trend=%.6f vol=%.6f → REBALANCE [USDC→USDT] %.1f%%",
+			riskLevel, current, velocity, trend, volatility, s.SuggestedFraction*100,
+		)
 	} else {
-		s.FromIndex = 1 // USDT slot
-		s.ToIndex = 0   // USDC slot
+		// Stablecoin depeg: sell expensive USDT, buy USDC
+		s.FromIndex = 1
+		s.ToIndex = 0
 		s.Action = "rebalance"
+		s.SuggestedFraction = math.Min(0.5, riskLevel/200)
+		s.Summary = fmt.Sprintf(
+			"Risk %.1f/100 | dev=%.5f%% vel=%.6f trend=%.6f vol=%.6f → REBALANCE [USDT→USDC] %.1f%%",
+			riskLevel, current, velocity, trend, volatility, s.SuggestedFraction*100,
+		)
 	}
-
-	s.SuggestedFraction = math.Min(0.5, riskLevel/200)
-	s.Summary = fmt.Sprintf(
-		"Risk %.1f/100 | dev=%.5f%% vel=%.6f trend=%.6f vol=%.6f → REBALANCE [%d→%d] %.1f%%",
-		riskLevel, current, velocity, trend, volatility,
-		s.FromIndex, s.ToIndex, s.SuggestedFraction*100,
-	)
 
 	w.mu.Lock()
 	w.lastScore = s

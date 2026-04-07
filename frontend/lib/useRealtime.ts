@@ -12,6 +12,9 @@ export interface FeedMessage {
     trend: number;
     velocity: number;
     volatility: number;
+    stable_risk: number;
+    volatile_risk: number;
+    volatile_prices: Record<string, number>;
     action: string;
     summary: string;
     from_index: number;

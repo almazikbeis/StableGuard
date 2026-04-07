@@ -34,7 +34,7 @@ pub mod stableguard {
         instructions::withdraw::handle_withdraw(ctx, token_index, amount)
     }
 
-    /// Virtual rebalance: shifts allocation from from_index to to_index.
+    /// Records a rebalance intent from from_index to to_index.
     pub fn execute_rebalance(
         ctx: Context<ExecuteRebalance>,
         from_index: u8,
@@ -88,5 +88,34 @@ pub mod stableguard {
     /// Auto-pauses vault if price < circuit_breaker_threshold.
     pub fn update_price_and_check(ctx: Context<UpdatePriceAndCheck>, price: u64) -> Result<()> {
         instructions::update_price::handle_update_price_and_check(ctx, price)
+    }
+
+    /// Records the result of a real external swap (e.g., Jupiter) as an on-chain receipt.
+    /// Balances should already be updated by real SPL movements; this links the
+    /// rebalance intent and external swap to immutable on-chain audit data.
+    pub fn record_swap_result(
+        ctx: Context<RecordSwapResult>,
+        params: RecordSwapResultParams,
+    ) -> Result<()> {
+        instructions::record_swap_result::handle_record_swap_result(ctx, params)
+    }
+
+    /// Admin-only: manually set vault.decision_count.
+    /// Use when PDA slots are occupied but counter is out of sync (e.g. after vault re-init).
+    pub fn admin_reset_decision_count(
+        ctx: Context<AdminResetDecisionCount>,
+        new_count: u64,
+    ) -> Result<()> {
+        instructions::admin_reset::handle_admin_reset_decision_count(ctx, new_count)
+    }
+
+    /// Demo-only: directly write accounting balances into the vault without real SPL transfers.
+    /// Used on devnet to simulate a funded treasury for AI demo flows.
+    pub fn set_demo_balances(
+        ctx: Context<SetDemoBalances>,
+        balances: Vec<u64>,
+        total_deposited: u64,
+    ) -> Result<()> {
+        instructions::set_demo_balances::handle_set_demo_balances(ctx, balances, total_deposited)
     }
 }

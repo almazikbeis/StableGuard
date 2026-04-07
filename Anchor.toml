@@ -8,11 +8,14 @@ skip-lint = false
 [programs.localnet]
 stableguard = "GPSJJqicuDSJ6LXhEZpmUboThjzdefG5wZAZkL2hd7es"
 
+[programs.devnet]
+stableguard = "GPSJJqicuDSJ6LXhEZpmUboThjzdefG5wZAZkL2hd7es"
+
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "/Users/almazbeisenov/.config/solana/devnet.json"
 
 [scripts]

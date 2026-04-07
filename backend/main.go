@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"os"
 	"os/signal"
@@ -53,7 +54,40 @@ func main() {
 		cfg.TelegramChatID,
 		cfg.DiscordWebhookURL,
 		time.Duration(cfg.AlertCooldownSec)*time.Second,
-	)
+	).WithTelegramSubscriptionStore(db)
+	if persisted, err := db.OperatorSettings(); err == nil {
+		cfg.StrategyMode = persisted.StrategyMode
+		cfg.AutoExecute = persisted.AutoExecute
+		cfg.YieldEnabled = persisted.YieldEnabled
+		cfg.YieldEntryRisk = persisted.YieldEntryRisk
+		cfg.YieldExitRisk = persisted.YieldExitRisk
+		cfg.CircuitBreakerPausePct = persisted.CircuitBreakerPausePct
+		cfg.AlertRiskThreshold = persisted.AlertRiskThreshold
+		if persisted.ExecutionApprovalMode != "" {
+			cfg.ExecutionApprovalMode = persisted.ExecutionApprovalMode
+		}
+		if persisted.AIAgentModel != "" {
+			cfg.AIAgentModel = persisted.AIAgentModel
+		}
+		if persisted.AIDecisionProfile != "" {
+			cfg.AIDecisionProfile = persisted.AIDecisionProfile
+		}
+		cfg.GrowthSleeveEnabled = persisted.GrowthSleeveEnabled
+		cfg.GrowthSleeveBudgetPct = persisted.GrowthSleeveBudgetPct
+		cfg.GrowthSleeveMaxAssetPct = persisted.GrowthSleeveMaxAssetPct
+		cfg.GrowthSleeveAllowedAssets = config.ParseCSVString(persisted.GrowthSleeveAllowedAssets)
+		cfg.GrowthSleeveLiveExecution = persisted.GrowthSleeveLiveExecution
+		// Only override env-configured credentials if DB has non-empty values
+		if persisted.TelegramBotToken != "" {
+			alerter.UpdateTelegram(persisted.TelegramBotToken, persisted.TelegramChatID)
+		}
+		if persisted.DiscordWebhookURL != "" {
+			alerter.UpdateDiscord(persisted.DiscordWebhookURL)
+		}
+		log.Printf("  Runtime     : restored persisted operator settings from SQLite (%s)", persisted.UpdatedAt.Format(time.RFC3339))
+	} else if err != nil && err != sql.ErrNoRows {
+		log.Printf("WARNING: failed to restore persisted operator settings: %v", err)
+	}
 
 	// ── SSE Hub ───────────────────────────────────────────────────────────
 	feedHub := hub.New()
@@ -64,17 +98,22 @@ func main() {
 		time.Duration(cfg.StreamPollFallbackSec)*time.Second,
 	)
 	scorer := risk.NewWindowedScorer(20)
-	agents := ai.New(cfg.AnthropicAPIKey)
+	agents := ai.New(cfg.AnthropicAPIKey, cfg.AIAgentModel, cfg.AIDecisionProfile)
 
 	// ── Yield Aggregator ──────────────────────────────────────────────────
 	yieldAgg := yield.NewAggregator()
 	yieldReadiness := cfg.YieldExecutionReadiness()
+	executionReadiness := cfg.ExecutionReadiness()
+	growthReadiness := cfg.GrowthReadiness()
 
 	// ── On-chain Whale Aggregator ─────────────────────────────────────────
 	whaleAgg := onchain.NewAggregator()
 
 	// ── Slippage Analyzer ─────────────────────────────────────────────────
 	slippageAnal := onchain.NewSlippageAnalyzer()
+
+	// NOTE: auto-repair removed. decision_count is now managed correctly on-chain
+	// via record_decision (which properly increments vault.decision_count after the mut fix).
 
 	// ── Optional: auto-delegate agent pubkey from config ──────────────────
 	if cfg.AgentPubkey != "" {
@@ -90,7 +129,8 @@ func main() {
 		WithStore(db).
 		WithAlerter(alerter).
 		WithHub(feedHub).
-		WithYield(yieldAgg)
+		WithYield(yieldAgg).
+		WithWhales(whaleAgg)
 
 	// Graceful shutdown context
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -98,6 +138,18 @@ func main() {
 
 	// Start pipeline in background
 	go pipe.Run(ctx)
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				alerter.SyncTelegramUpdates()
+			}
+		}
+	}()
 
 	// ── Logging banner ────────────────────────────────────────────────────
 	strategyNames := map[uint8]string{0: "SAFE", 1: "BALANCED", 2: "YIELD"}
@@ -110,6 +162,7 @@ func main() {
 	log.Printf("  Strategy    : %s (mode=%d)", strategyNames[cfg.StrategyMode], cfg.StrategyMode)
 	log.Printf("  AutoExecute : %v", cfg.AutoExecute)
 	log.Printf("  AI interval : %ds", cfg.AIIntervalSec)
+	log.Printf("  AI model    : %s | profile=%s", cfg.AIAgentModel, cfg.AIDecisionProfile)
 	log.Printf("  Alerts      : Telegram=%v Discord=%v",
 		cfg.TelegramBotToken != "", cfg.DiscordWebhookURL != "")
 	log.Printf("  Circuit Br. : enabled=%v pause=%.1f%% emergency=%.1f%%",
@@ -125,7 +178,8 @@ func main() {
 	app.Use(logger.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept",
+		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
+		AllowMethods: "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 	}))
 
 	log.Printf("  Yield Opt.  : enabled=%v minAPY=%.1f%% entryRisk=%.0f exitRisk=%.0f",
@@ -139,6 +193,12 @@ func main() {
 		log.Printf("  Yield Vaults: missing=%v", yieldReadiness.MissingKaminoVaults)
 	}
 	log.Printf("  Yield Note  : %s", yieldReadiness.Note)
+	log.Printf("  Exec Custody: mode=%s ready=%v missing=%v",
+		executionReadiness.Mode, executionReadiness.ReadyForStaging, executionReadiness.MissingCustodyAccounts)
+	log.Printf("  Exec Note   : %s", executionReadiness.Note)
+	log.Printf("  Growth Mode : mode=%s budget=%.1f%% assets=%v",
+		growthReadiness.Mode, growthReadiness.BudgetPct, growthReadiness.AllowedAssets)
+	log.Printf("  Growth Note : %s", growthReadiness.Note)
 
 	handler := api.New(pythMonitor, llmClient, executor).
 		WithConfig(cfg).

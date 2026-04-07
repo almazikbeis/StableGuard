@@ -4,6 +4,7 @@ import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Send, CheckCircle, AlertCircle, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "@/lib/toast";
+import { ASSET_OPTIONS } from "@/lib/assets";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api/v1";
 
@@ -13,12 +14,12 @@ function authHeaders(): HeadersInit {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-const TOKENS = [
-  { label: "USDC", index: 0, decimals: 6 },
-  { label: "USDT", index: 1, decimals: 6 },
-  { label: "DAI",  index: 2, decimals: 9 },
-  { label: "PYUSD",index: 3, decimals: 6 },
-];
+const TOKENS = ASSET_OPTIONS.map((asset) => ({
+  label: asset.symbol,
+  index: asset.index,
+  decimals: asset.decimals,
+  color: asset.color,
+}));
 
 interface TxResult {
   sig: string;
@@ -52,7 +53,7 @@ export function DAOPayments() {
       return;
     }
 
-    // Convert to token units (USDC/USDT = 6 decimals)
+    // Convert UI amount to raw token units for the selected treasury asset.
     const rawAmount = Math.floor(amountNum * Math.pow(10, selectedToken.decimals));
 
     setSending(true);
@@ -99,8 +100,8 @@ export function DAOPayments() {
       {/* Header */}
       <div className="px-4 pt-4 pb-3 border-b border-gray-100 flex items-center gap-2">
         <Send size={14} className="text-blue-500" />
-        <span className="text-sm font-semibold text-gray-900">DAO Treasury Payment</span>
-        <span className="text-xs text-gray-400">Route stablecoins from vault to any recipient</span>
+        <span className="text-sm font-semibold text-gray-900">Treasury Payment</span>
+        <span className="text-xs text-gray-400">Route supported treasury assets to any recipient token account</span>
       </div>
 
       <div className="p-4 space-y-4">

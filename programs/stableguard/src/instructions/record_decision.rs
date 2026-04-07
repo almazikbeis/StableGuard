@@ -17,6 +17,7 @@ pub struct RecordDecision<'info> {
     pub authority: Signer<'info>,
 
     #[account(
+        mut,
         seeds = [b"vault", authority.key().as_ref()],
         bump = vault.bump,
         has_one = authority

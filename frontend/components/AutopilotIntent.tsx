@@ -8,8 +8,8 @@ import { toast } from "@/lib/toast";
 
 const EXAMPLES = [
   "Earn max yield while protecting against any depeg above 0.5%",
-  "Keep my capital safe, only USDC, sleep at night",
-  "Aggressive APY on Kamino, I'm okay with medium risk",
+  "Keep my capital safe, overweight stables and cut BTC or SOL risk fast",
+  "Aggressive APY on Kamino, but keep a capped BTC and SOL growth sleeve",
   "Balanced approach, rebalance when risk exceeds 40",
 ];
 

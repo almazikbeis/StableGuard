@@ -30,18 +30,9 @@ describe("stableguard", () => {
   let userToken0: anchor.web3.PublicKey;
   let userToken1: anchor.web3.PublicKey;
   let userToken2: anchor.web3.PublicKey;
-  let authorityPosition: anchor.web3.PublicKey;
 
   const attacker = anchor.web3.Keypair.generate();
   let attackerToken0: anchor.web3.PublicKey;
-  let attackerPosition: anchor.web3.PublicKey;
-
-  function deriveUserPosition(user: anchor.web3.PublicKey) {
-    return anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("user_position"), vaultPda.toBuffer(), user.toBuffer()],
-      program.programId
-    )[0];
-  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // Setup
@@ -86,9 +77,6 @@ describe("stableguard", () => {
     await mintTo(provider.connection, authority.payer, mockUSDC,  userToken0, authority.publicKey, 10_000_000 * 1e6);
     await mintTo(provider.connection, authority.payer, mockUSDT,  userToken1, authority.publicKey, 10_000_000 * 1e6);
     await mintTo(provider.connection, authority.payer, mockUSDCe, userToken2, authority.publicKey, 10_000_000 * 1e6);
-
-    authorityPosition = deriveUserPosition(authority.publicKey);
-    attackerPosition = deriveUserPosition(attacker.publicKey);
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -232,13 +220,11 @@ describe("stableguard", () => {
     await program.methods
       .deposit(0, new anchor.BN(100 * 1e6))
       .accounts({
-        user: authority.publicKey,
+        authority: authority.publicKey,
         vault: vaultPda,
-        userTokenAccount: userToken0,
+        authorityTokenAccount: userToken0,
         vaultTokenAccount: vaultToken0,
-        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -253,13 +239,11 @@ describe("stableguard", () => {
     await program.methods
       .deposit(1, new anchor.BN(200 * 1e6))
       .accounts({
-        user: authority.publicKey,
+        authority: authority.publicKey,
         vault: vaultPda,
-        userTokenAccount: userToken1,
+        authorityTokenAccount: userToken1,
         vaultTokenAccount: vaultToken1,
-        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -273,13 +257,11 @@ describe("stableguard", () => {
     await program.methods
       .deposit(2, new anchor.BN(150 * 1e6))
       .accounts({
-        user: authority.publicKey,
+        authority: authority.publicKey,
         vault: vaultPda,
-        userTokenAccount: userToken2,
+        authorityTokenAccount: userToken2,
         vaultTokenAccount: vaultToken2,
-        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -291,10 +273,11 @@ describe("stableguard", () => {
   // 4. execute_rebalance
   // ─────────────────────────────────────────────────────────────────────────
 
-  it("execute_rebalance: shifts 50 USDC (0→1)", async () => {
+  it("execute_rebalance: records intent for 50 USDC (0→1) without mutating balances", async () => {
     const before = await program.account.vaultState.fetch(vaultPda);
     const b0 = before.balances[0].toNumber();
     const b1 = before.balances[1].toNumber();
+    const rebalancesBefore = before.totalRebalances.toNumber();
 
     await program.methods
       .executeRebalance(0, 1, new anchor.BN(50 * 1e6))
@@ -302,15 +285,16 @@ describe("stableguard", () => {
       .rpc();
 
     const after = await program.account.vaultState.fetch(vaultPda);
-    assert.equal(after.balances[0].toNumber(), b0 - 50 * 1e6);
-    assert.equal(after.balances[1].toNumber(), b1 + 50 * 1e6);
-    assert.equal(after.totalRebalances.toNumber(), 1);
+    assert.equal(after.balances[0].toNumber(), b0);
+    assert.equal(after.balances[1].toNumber(), b1);
+    assert.equal(after.totalRebalances.toNumber(), rebalancesBefore);
   });
 
-  it("execute_rebalance: shifts 30 USDT (1→2)", async () => {
+  it("execute_rebalance: records intent for 30 USDT (1→2) without mutating balances", async () => {
     const before = await program.account.vaultState.fetch(vaultPda);
     const b1 = before.balances[1].toNumber();
     const b2 = before.balances[2].toNumber();
+    const rebalancesBefore = before.totalRebalances.toNumber();
 
     await program.methods
       .executeRebalance(1, 2, new anchor.BN(30 * 1e6))
@@ -318,9 +302,32 @@ describe("stableguard", () => {
       .rpc();
 
     const after = await program.account.vaultState.fetch(vaultPda);
-    assert.equal(after.balances[1].toNumber(), b1 - 30 * 1e6);
-    assert.equal(after.balances[2].toNumber(), b2 + 30 * 1e6);
-    assert.equal(after.totalRebalances.toNumber(), 2);
+    assert.equal(after.balances[1].toNumber(), b1);
+    assert.equal(after.balances[2].toNumber(), b2);
+    assert.equal(after.totalRebalances.toNumber(), rebalancesBefore);
+  });
+
+  it("record_swap_result: increments completed rebalances without mutating balances", async () => {
+    const before = await program.account.vaultState.fetch(vaultPda);
+    const b0 = before.balances[0].toNumber();
+    const b1 = before.balances[1].toNumber();
+    const rebalancesBefore = before.totalRebalances.toNumber();
+
+    await program.methods
+      .recordSwapResult({
+        fromIndex: 0,
+        toIndex: 1,
+        inputAmount: new anchor.BN(20 * 1e6),
+        outputAmount: new anchor.BN(19 * 1e6),
+        swapSignature: "demo-swap-signature",
+      })
+      .accounts({ signer: authority.publicKey, vault: vaultPda })
+      .rpc();
+
+    const after = await program.account.vaultState.fetch(vaultPda);
+    assert.equal(after.balances[0].toNumber(), b0);
+    assert.equal(after.balances[1].toNumber(), b1);
+    assert.equal(after.totalRebalances.toNumber(), rebalancesBefore + 1);
   });
 
   it("execute_rebalance: fails when from_index == to_index", async () => {
@@ -354,13 +361,11 @@ describe("stableguard", () => {
       await program.methods
         .deposit(0, new anchor.BN(10 * 1e6))
         .accounts({
-          user: authority.publicKey,
+          authority: authority.publicKey,
           vault: vaultPda,
-          userTokenAccount: userToken0,
+          authorityTokenAccount: userToken0,
           vaultTokenAccount: vaultToken0,
-          userPosition: authorityPosition,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc();
       assert.fail("Should have thrown VaultPaused");
@@ -376,12 +381,10 @@ describe("stableguard", () => {
     await program.methods
       .withdraw(0, withdrawAmount)
       .accounts({
-        user: authority.publicKey,
-        owner: authority.publicKey,
+        authority: authority.publicKey,
         vault: vaultPda,
-        userTokenAccount: userToken0,
+        authorityTokenAccount: userToken0,
         vaultTokenAccount: vaultToken0,
-        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
       .rpc();
@@ -393,26 +396,23 @@ describe("stableguard", () => {
     );
   });
 
-  it("withdraw: rejects unauthorized signer even if they pass a valid vault token account", async () => {
+  it("withdraw: rejects unauthorized treasury signer", async () => {
     try {
       await program.methods
         .withdraw(0, new anchor.BN(1 * 1e6))
         .accounts({
-          user: attacker.publicKey,
-          owner: attacker.publicKey,
+          authority: attacker.publicKey,
           vault: vaultPda,
-          userTokenAccount: attackerToken0,
+          authorityTokenAccount: attackerToken0,
           vaultTokenAccount: vaultToken0,
-          userPosition: attackerPosition,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .signers([attacker])
         .rpc();
-      assert.fail("Should have thrown because attacker has no position");
+      assert.fail("Should have thrown because attacker is not the treasury authority");
     } catch (err: any) {
       assert.ok(
-        err.message.includes("AccountNotInitialized") ||
-        err.message.includes("InsufficientBalance") ||
+        err.message.includes("ConstraintSeeds") ||
         err.message.includes("Unauthorized"),
         `unexpected error: ${err.message}`
       );
@@ -661,37 +661,31 @@ describe("stableguard", () => {
     await program.methods
       .deposit(0, new anchor.BN(50 * 1e6))
       .accounts({
-        user: authority.publicKey,
+        authority: authority.publicKey,
         vault: vaultPda,
-        userTokenAccount: userToken0,
+        authorityTokenAccount: userToken0,
         vaultTokenAccount: vaultToken0,
-        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
     await program.methods
       .deposit(1, new anchor.BN(40 * 1e6))
       .accounts({
-        user: authority.publicKey,
+        authority: authority.publicKey,
         vault: vaultPda,
-        userTokenAccount: userToken1,
+        authorityTokenAccount: userToken1,
         vaultTokenAccount: vaultToken1,
-        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
     await program.methods
       .deposit(2, new anchor.BN(30 * 1e6))
       .accounts({
-        user: authority.publicKey,
+        authority: authority.publicKey,
         vault: vaultPda,
-        userTokenAccount: userToken2,
+        authorityTokenAccount: userToken2,
         vaultTokenAccount: vaultToken2,
-        userPosition: authorityPosition,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 

@@ -20,7 +20,7 @@ const features = [
   {
     icon: Zap,
     title: "Real-time Pyth Prices",
-    desc: "Sub-second price feeds for USDC, USDT, DAI, and PYUSD straight from Pyth Network oracle.",
+    desc: "Sub-second price feeds for BTC, ETH, SOL, USDC, USDT, DAI, and PYUSD from Pyth Network oracle.",
     color: "#f59e0b",
   },
   {
@@ -37,8 +37,8 @@ const features = [
   },
   {
     icon: BarChart2,
-    title: "Risk Engine v2",
-    desc: "Windowed scoring: trend momentum + price velocity + volatility combined into a 0–100 score.",
+    title: "Portfolio Risk Engine v2",
+    desc: "Windowed scoring: stablecoin peg deviation + volatile asset momentum + volatility = 0–100 score.",
     color: "#06b6d4",
   },
   {
@@ -56,7 +56,7 @@ const features = [
 ];
 
 const stats = [
-  { value: "4",    label: "Stablecoins tracked" },
+  { value: "7",    label: "Assets tracked" },
   { value: "<1s",  label: "Price latency" },
   { value: "24/7", label: "Risk monitoring" },
   { value: "4",    label: "Control modes" },
@@ -70,6 +70,9 @@ const pipeline = [
 ];
 
 const ticker = [
+  { symbol: "BTC",   price: 68420,  delta: +1.24 },
+  { symbol: "ETH",   price: 3540,   delta: +0.87 },
+  { symbol: "SOL",   price: 142.30, delta: +2.10 },
   { symbol: "USDC",  price: 1.0001, delta: +0.01 },
   { symbol: "USDT",  price: 0.9999, delta: -0.01 },
   { symbol: "DAI",   price: 1.0002, delta: +0.02 },
@@ -109,8 +112,17 @@ function FeatureCard({
 /* ── Page ──────────────────────────────────────────────────────────── */
 
 export default function LandingPage() {
+  // If user already onboarded, redirect to dashboard
+  if (typeof window !== "undefined") {
+    const jwt  = localStorage.getItem("sg_jwt");
+    const user = JSON.parse(localStorage.getItem("sg_user") || "{}");
+    if (jwt && user.onboarded) {
+      window.location.replace("/dashboard");
+      return null;
+    }
+  }
   return (
-    <div className="min-h-screen overflow-x-hidden">
+    <div className="app-shell min-h-screen overflow-x-hidden">
 
       {/* ── Background orbs ── */}
       <div className="fixed inset-0 pointer-events-none overflow-hidden" aria-hidden>
@@ -138,7 +150,7 @@ export default function LandingPage() {
             <Shield size={16} className="text-white" />
           </div>
           <span className="font-display font-bold text-slate-50 text-[15px] uppercase tracking-[0.08em]">StableGuard</span>
-          <span className="hidden sm:inline text-xs text-slate-400 font-normal">· Configurable AI autonomy for stablecoin vaults</span>
+          <span className="hidden sm:inline text-xs text-slate-400 font-normal">· AI-managed crypto treasury on Solana</span>
         </div>
         <div className="flex items-center gap-2">
           <Link href="/auth/login" className="text-sm font-medium text-slate-400 hover:text-white transition-colors px-3 py-2">
@@ -154,7 +166,7 @@ export default function LandingPage() {
       </nav>
 
       {/* ── Hero ── */}
-      <section className="relative z-10 flex flex-col items-center text-center px-6 pt-20 pb-16">
+      <section className="hero-stage relative z-10 flex flex-col items-center text-center px-6 pt-20 pb-16">
         {/* Pill badge */}
         <motion.div
           initial={{ opacity: 0, scale: 0.88 }}
@@ -173,7 +185,7 @@ export default function LandingPage() {
           transition={{ delay: 0.1, type: "spring", stiffness: 80, damping: 20 }}
           className="font-display font-extrabold text-[52px] sm:text-[68px] lg:text-[78px] leading-[1.03] tracking-tight text-white max-w-5xl mb-6"
         >
-          Stablecoin Treasury,
+          Crypto Treasury,
           <br />
           <span className="text-orange-400">Under Intelligent Command</span>
         </motion.h1>
@@ -185,10 +197,16 @@ export default function LandingPage() {
           transition={{ delay: 0.2, type: "spring", stiffness: 80, damping: 20 }}
           className="text-lg text-slate-300 max-w-2xl leading-relaxed mb-10"
         >
-          Real-time Pyth prices. Explainable AI policy modes. Safety-first vault orchestration.
+          7 treasury assets. Real-time Pyth prices. Explainable AI policy modes. Safety-first on-chain execution.
           <br className="hidden sm:block" />
-          From manual control to emergency-only protection to active optimization.
+          BTC, ETH, SOL, and reserve assets under one treasury policy layer, from manual control to AI-guided execution.
         </motion.p>
+
+        <div className="status-ribbon justify-center mb-10">
+          <span className="status-node rounded-full px-3 py-1.5 text-[11px] uppercase tracking-[0.18em] text-cyan-100">BTC · ETH · SOL</span>
+          <span className="status-node rounded-full px-3 py-1.5 text-[11px] uppercase tracking-[0.18em] text-orange-100">AI control modes</span>
+          <span className="status-node rounded-full px-3 py-1.5 text-[11px] uppercase tracking-[0.18em] text-violet-100">Growth sleeve ready</span>
+        </div>
 
         {/* CTA */}
         <motion.div
@@ -198,7 +216,7 @@ export default function LandingPage() {
         >
           <div className="flex flex-col sm:flex-row items-center gap-3">
             <Link
-              href="/auth/register"
+              href="/onboarding"
               className="inline-flex items-center gap-2.5 bg-orange-500 hover:bg-orange-400 active:scale-[0.98] text-white font-bold text-base px-8 py-4 rounded-2xl transition-all shadow-[0_18px_48px_rgba(255,122,26,0.26)] hover:scale-[1.02]"
             >
               <TrendingUp size={18} />
@@ -234,11 +252,11 @@ export default function LandingPage() {
             className="panel-surface-soft rounded-[24px] p-5 text-left animate-float"
             style={{ animationDelay: "1.8s" }}
           >
-            <p className="text-xs text-slate-400 font-semibold mb-2 uppercase tracking-wide">USDC</p>
+            <p className="text-xs text-slate-400 font-semibold mb-2 uppercase tracking-wide">Reserve Asset</p>
             <p className="font-display font-extrabold text-4xl text-white font-mono-data tabular-nums">
               $1.0001
             </p>
-            <p className="text-xs text-emerald-300 mt-1.5 font-medium">+0.01% vs peg</p>
+            <p className="text-xs text-emerald-300 mt-1.5 font-medium">Policy-selected safety sleeve</p>
           </div>
 
           <div
